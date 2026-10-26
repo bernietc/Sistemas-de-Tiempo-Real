@@ -1,0 +1,330 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<model version="NetLogo 7.0.4" snapToGrid="true"><code>; STR - Prototipo 1. Recorrido didactico, no calibrado con la linea D.
+; Un tick representa un segundo SIMULADO.
+breed [estaciones estacion]
+breed [trenes tren]
+breed [pasajeros pasajero]
+globals [ingresados finalizados embarcados espera-acumulada]
+estaciones-own [orden nombre acumulador]
+trenes-own [estado sentido actual destino restante visitas vueltas capacidad]
+pasajeros-own [personas origen destino-p sentido-p llegada estado-p tren-asignado]
+
+to setup
+  clear-all
+  ask patches [ set pcolor 9.5 ]
+  foreach [0 1 2] [ i -&gt;
+    create-estaciones 1 [
+      set orden i
+      set nombre item i ["Estacion A" "Estacion B" "Estacion C"]
+      setxy (-22 + 22 * i) 0
+      set shape "circle"
+      set size 1.8
+      set color green - 1
+      set label nombre
+      set label-color black
+    ]
+  ]
+  ask estaciones with [orden &lt; 2] [
+    let siguiente one-of estaciones with [orden = [orden] of myself + 1]
+    create-link-with siguiente [ set color gray set thickness 0.25 ]
+  ]
+  create-trenes 1 [
+    set shape "tren-str"
+    set size 3
+    set color blue
+    set capacidad capacidad-tren
+    set actual 0
+    set destino 1
+    set sentido 1
+    set estado "DETENIDO"
+    set restante parada-seg
+    set visitas 0
+    set vueltas 0
+    move-to one-of estaciones with [orden = 0]
+    set ycor 1.8
+    set heading 90
+    set label "T1"
+    set label-color black
+  ]
+  reset-ticks
+  actualizar-vista
+  comprobar-modelo
+end
+
+to go
+  if not any? trenes [ stop ]
+  ; Cada paso termina en el segundo indicado por ticks.
+  tick
+  generar-pasajeros
+  ask trenes [ avanzar-tren ]
+  actualizar-vista
+  comprobar-modelo
+end
+
+to avanzar-tren
+  ifelse estado = "EN VIAJE" [
+    ; Interpolacion visual: la duracion, no el dibujo, gobierna el viaje.
+    let llegada one-of estaciones with [orden = [destino] of myself]
+    set xcor xcor + (([xcor] of llegada - xcor) / restante)
+    set restante restante - 1
+    if restante = 0 [
+      set actual destino
+      set estado "DETENIDO"
+      set restante parada-seg
+      set visitas visitas + 1
+      if actual = 0 [ set vueltas vueltas + 1 ]
+      set color blue
+      intercambiar-pasajeros
+    ]
+  ] [
+    ; Tambien permite subir a quienes llegan durante la detencion.
+    intercambiar-pasajeros
+    set restante restante - 1
+    if restante = 0 [
+      ; En terminal invierte el sentido al terminar la detencion.
+      if actual = 2 [ set sentido -1 ]
+      if actual = 0 [ set sentido 1 ]
+      set destino actual + sentido
+      set heading ifelse-value (sentido = 1) [90] [270]
+      set estado "EN VIAJE"
+      set restante viaje-seg
+      set color orange
+    ]
+  ]
+end
+
+to-report estado-tren
+  if not any? trenes [ report "Pulsar Preparar" ]
+  report [estado] of one-of trenes
+end
+
+to-report ubicacion-tren
+  if not any? trenes [ report "-" ]
+  let t one-of trenes
+  let a [actual] of t
+  let d [destino] of t
+  if [estado] of t = "EN VIAJE" [
+    report (word item a ["A" "B" "C"] " -&gt; " item d ["A" "B" "C"])
+  ]
+  report (word "Estacion " item a ["A" "B" "C"])
+end
+
+to-report sentido-tren
+  if not any? trenes [ report "-" ]
+  report ifelse-value ([sentido] of one-of trenes = 1) ["Hacia C"] ["Hacia A"]
+end
+
+; DEMANDA DE PRUEBA: igual para las tres estaciones.
+; Se acumulan fracciones y se generan personas cada diez segundos.
+; Los destinos son equiprobables entre las otras dos estaciones.
+to generar-pasajeros
+  ask estaciones [
+    set acumulador acumulador + demanda-min / 60
+    if ticks mod 10 = 0 [
+      let pendientes floor acumulador
+      set acumulador acumulador - pendientes
+      while [pendientes &gt; 0] [
+        let n min (list 5 pendientes)
+        let o orden
+        let d one-of (remove o [0 1 2])
+        hatch-pasajeros 1 [
+          set personas n
+          set origen o
+          set destino-p d
+          set sentido-p ifelse-value (d &gt; o) [1] [-1]
+          set llegada ticks
+          set estado-p "ESPERANDO"
+          set tren-asignado nobody
+          set shape "circle"
+          set size 0.65
+          set label ""
+        ]
+        set ingresados ingresados + n
+        set pendientes pendientes - n
+      ]
+    ]
+  ]
+end
+
+; Ejecutado por el tren: primero bajan, luego suben en orden FIFO.
+to intercambiar-pasajeros
+  let t self
+  let parada actual
+  ask pasajeros with [estado-p = "VIAJANDO" and tren-asignado = t and destino-p = parada] [
+    set finalizados finalizados + personas
+    die
+  ]
+  ; El sentido de embarque en terminal es el de la proxima salida.
+  let direccion sentido
+  if actual = 0 [ set direccion 1 ]
+  if actual = 2 [ set direccion -1 ]
+  let libres capacidad - sum [personas] of pasajeros with [tren-asignado = t]
+  let cola sort-by [[a b] -&gt;
+    ifelse-value ([llegada] of a = [llegada] of b)
+      [[who] of a &lt; [who] of b]
+      [[llegada] of a &lt; [llegada] of b]
+  ] pasajeros with [estado-p = "ESPERANDO" and origen = parada and sentido-p = direccion]
+  foreach cola [ p -&gt;
+    if libres &gt; 0 [
+      let n min (list libres [personas] of p)
+      set espera-acumulada espera-acumulada + n * (ticks - [llegada] of p)
+      set embarcados embarcados + n
+      ask p [
+        ifelse n = personas [
+          set estado-p "VIAJANDO"
+          set tren-asignado t
+          hide-turtle
+        ] [
+          ; El resto conserva el mismo instante de llegada y prioridad.
+          set personas personas - n
+          hatch-pasajeros 1 [
+            set personas n
+            set estado-p "VIAJANDO"
+            set tren-asignado t
+            hide-turtle
+          ]
+        ]
+      ]
+      set libres libres - n
+    ]
+  ]
+end
+
+to actualizar-vista
+  ask estaciones [
+    let o orden
+    let hacia-a sum [personas] of pasajeros with [estado-p = "ESPERANDO" and origen = o and sentido-p = -1]
+    let hacia-c sum [personas] of pasajeros with [estado-p = "ESPERANDO" and origen = o and sentido-p = 1]
+    set label (word nombre " | A: " hacia-a " / C: " hacia-c)
+    foreach [-1 1] [ d -&gt;
+      let cola sort pasajeros with [estado-p = "ESPERANDO" and origen = o and sentido-p = d]
+      let indice 0
+      foreach cola [ p -&gt;
+        let px xcor
+        ask p [
+          ifelse indice &lt; 12 [
+            show-turtle
+            setxy (px - 3 + (indice mod 6)) (ifelse-value (d = 1) [-3 - floor (indice / 6)] [-6 - floor (indice / 6)])
+            set color ifelse-value (d = 1) [violet] [red]
+          ] [ hide-turtle ]
+        ]
+        set indice indice + 1
+      ]
+    ]
+  ]
+  ask trenes [
+    let t self
+    set label (word "T1 " sum [personas] of pasajeros with [tren-asignado = t] "/" capacidad)
+  ]
+end
+
+to-report esperando
+  report sum [personas] of pasajeros with [estado-p = "ESPERANDO"]
+end
+
+to-report a-bordo
+  report sum [personas] of pasajeros with [estado-p = "VIAJANDO"]
+end
+
+to-report espera-media
+  if embarcados = 0 [ report 0 ]
+  report espera-acumulada / embarcados
+end
+
+to-report balance
+  report ingresados - esperando - a-bordo - finalizados
+end
+
+; Si falla una regla, interrumpe la ejecucion con un mensaje.
+to comprobar-modelo
+  if balance != 0 [ error "No se conserva la cantidad de personas." ]
+  ask trenes [
+    let t self
+    if sum [personas] of pasajeros with [tren-asignado = t] &gt; capacidad [
+      error "Se supero la capacidad del tren."
+    ]
+  ]
+  if any? pasajeros with [personas &lt;= 0 or personas != floor personas] [
+    error "Grupo con cantidad de personas invalida."
+  ]
+end
+</code><widgets><view x="315" y="65" width="736" height="232" minPxcor="-30" maxPxcor="30" minPycor="-9" maxPycor="9" patchSize="12" fontSize="13" frameRate="30" wrappingAllowedX="false" wrappingAllowedY="false" showTickCounter="true" tickCounterLabel="Segundos simulados" updateMode="1" /><button x="20" y="75" width="135" height="40" display="Preparar / reiniciar" kind="Observer" forever="false" disableUntilTicks="false">setup</button><button x="165" y="75" width="130" height="40" display="Un segundo" kind="Observer" forever="false" disableUntilTicks="true">go</button><button x="20" y="125" width="135" height="40" display="Simular / pausar" kind="Observer" forever="true" disableUntilTicks="true">go</button><slider x="20" y="205" width="275" height="50" display="viaje-seg" variable="viaje-seg" min="1" max="120" step="1" default="30" direction="Horizontal" units="s" /><slider x="20" y="265" width="275" height="50" display="parada-seg" variable="parada-seg" min="1" max="60" step="1" default="10" direction="Horizontal" units="s" /><monitor x="315" y="320" width="170" height="60" display="Estado" precision="0" fontSize="12">estado-tren</monitor><monitor x="490" y="320" width="180" height="60" display="Ubicacion" precision="0" fontSize="12">ubicacion-tren</monitor><monitor x="675" y="320" width="170" height="60" display="Sentido" precision="0" fontSize="12">sentido-tren</monitor><monitor x="850" y="320" width="180" height="60" display="Restan (s)" precision="0" fontSize="12">ifelse-value any? trenes [[restante] of one-of trenes] [0]</monitor><monitor x="315" y="390" width="170" height="60" display="Llegadas" precision="0" fontSize="12">sum [visitas] of trenes</monitor><monitor x="490" y="390" width="180" height="60" display="Vueltas A-C-A" precision="0" fontSize="12">sum [vueltas] of trenes</monitor><note x="20" y="10" width="1030" height="45" fontSize="20" markdown="false" textColorLight="-16777216" textColorDark="-1" backgroundLight="0" backgroundDark="0">STR | Prototipo 2: pasajeros, capacidad y colas</note><note x="20" y="455" width="275" height="160" fontSize="13" markdown="false" textColorLight="-16777216" textColorDark="-1" backgroundLight="0" backgroundDark="0">Puntos violetas: hacia C.
+Puntos rojos: hacia A.
+Un punto representa hasta 5 personas.
+Se muestran hasta 12 grupos por cola;
+las etiquetas cuentan a TODOS.
+
+Capacidad: pulsar Preparar para aplicar.</note><note x="680" y="395" width="360" height="90" fontSize="13" markdown="false" textColorLight="-16777216" textColorDark="-1" backgroundLight="0" backgroundDark="0">Datos ficticios. Un tick = un segundo.
+Espera media: personas que ya subieron.
+Balance debe permanecer en cero.</note><slider x="20" y="325" width="275" height="50" display="demanda-min" variable="demanda-min" min="0" max="120" step="1" default="12" direction="Horizontal" units="pers/min/estacion" /><slider x="20" y="385" width="275" height="50" display="capacidad-tren" variable="capacidad-tren" min="1" max="300" step="1" default="60" direction="Horizontal" units="personas" /><monitor x="315" y="465" width="170" height="60" display="Ingresados" precision="0" fontSize="12">ingresados</monitor><monitor x="490" y="465" width="170" height="60" display="Esperando" precision="0" fontSize="12">esperando</monitor><monitor x="675" y="465" width="170" height="60" display="A bordo" precision="0" fontSize="12">a-bordo</monitor><monitor x="850" y="465" width="170" height="60" display="Finalizados" precision="0" fontSize="12">finalizados</monitor><monitor x="315" y="535" width="170" height="60" display="Espera media (s)" precision="1" fontSize="12">espera-media</monitor><monitor x="490" y="535" width="170" height="60" display="Balance (debe ser 0)" precision="0" fontSize="12">balance</monitor><monitor x="675" y="535" width="200" height="60" display="Personas que subieron" precision="0" fontSize="12">embarcados</monitor></widgets><info>## PROTOTIPO 2: PASAJEROS Y CAPACIDAD
+Tres estaciones ficticias y un tren A-B-C-B-A. Los tiempos y la demanda son de prueba. Todavia no representa la linea D ni permite comparar frecuencias de multiples trenes.
+
+## USO
+Preparar / reiniciar crea el modelo. Un segundo avanza un tick. Simular / pausar activa o detiene la ejecucion continua. Un tick equivale a un segundo simulado.
+viaje-seg: duracion de cada tramo. parada-seg: duracion de cada parada. Cambios al comenzar la siguiente fase.
+demanda-min: personas por minuto POR ESTACION, igual para A, B y C; se puede modificar en marcha. Cero detiene nuevas entradas, conservando colas y fracciones acumuladas.
+capacidad-tren: capacidad total en personas. Se aplica al pulsar Preparar para evitar reducirla por debajo de quienes ya estan viajando.
+Valores iniciales: 30 segundos por tramo, 10 segundos de parada, 12 personas/minuto/estacion y capacidad 60.
+
+## PASAJEROS
+Cada agente representa de 1 a 5 personas con el mismo origen, destino e instante de llegada. Se acumula la demanda fraccionaria y se crean grupos cada diez segundos. El instante de llegada es el de creacion del grupo: no se representa el tiempo previo a ese instante.
+Cada grupo elige una de las otras dos estaciones con igual probabilidad. No son los pesos territoriales del proyecto final. El destino se fija una sola vez. El sentido se deduce de origen y destino.
+Las colas se atienden por instante de llegada y, ante empate, identificador who. Si no hay lugar para todos, el grupo se divide conservando la prioridad del resto.
+El tren permite descenso y ascenso al llegar, y nuevamente durante cada segundo detenido. En terminal embarca hacia el sentido de la proxima salida. Ascenso y descenso son instantaneos dentro del paso; no modifican el tiempo de parada.
+Al finalizar el viaje se suman las personas al contador Finalizados y se eliminan sus agentes para ahorrar memoria.
+
+## VISTA
+Tren azul detenido, naranja viajando. Su etiqueta indica ocupacion/capacidad.
+Puntos violetas: grupos hacia C; rojos: grupos hacia A. Las posiciones de los puntos son esquematicas, no representan ubicacion real ni distancia social. No se dibujan todos los grupos cuando hay mas de 12 por cola; las etiquetas A/C de cada estacion y los monitores siempre cuentan a todos. Los grupos a bordo se ocultan y se cuentan en el tren.
+
+## INDICADORES
+Ingresados: personas creadas, excluye fracciones pendientes.
+Esperando: personas en todas las colas.
+A bordo: personas en el tren.
+Finalizados: personas que bajaron en su destino.
+Espera media: suma de esperas individuales dividida por personas que ya subieron. Ponderada por personas, no por agentes. No incluye la espera todavia incompleta de las colas; con mucha congestion debe leerse junto a Esperando.
+Balance = ingresados - esperando - a bordo - finalizados. Debe ser cero. Se comprueban automaticamente conservacion, capacidad y cantidades positivas enteras en cada paso.
+
+## PRUEBAS PROPUESTAS
+1. Preparar y avanzar: aparecen grupos cada diez segundos; suben al pasar el tren en el sentido correcto y bajan en destino.
+2. Bajar capacidad-tren a 10 y pulsar Preparar: quedan personas esperando, aunque el tren sigue atendiendo.
+3. Poner demanda-min en cero: se dejan de crear personas; con suficiente tiempo el tren vacia las colas y todos finalizan.
+4. Observar que Balance sigue en cero, incluso al dividir grupos.
+5. Preparar reinicia contadores y agentes.
+Los destinos son aleatorios. Dos reinicios pueden producir resultados diferentes.
+
+## CODIGO
+setup: estaciones y tren. go: reloj, entradas, tren, vista y comprobaciones.
+generar-pasajeros: demanda, grupos y destinos.
+intercambiar-pasajeros: descensos, FIFO, capacidad y division.
+actualizar-vista: representacion y etiquetas.
+comprobar-modelo: invariantes automaticos.
+
+## SIGUIENTE ETAPA
+Varias formaciones e intervalo entre salidas. Luego estaciones reales, demanda de molinetes y pesos de destino por horario. Evento masivo como objetivo secundario.
+</info><turtleShapes><shape name="default" rotatable="true" editableColorIndex="0"><polygon color="-7500403" filled="true" marked="true"><point x="150" y="5" /><point x="40" y="250" /><point x="150" y="205" /><point x="260" y="250" /></polygon></shape><shape name="circle" rotatable="true" editableColorIndex="0"><circle x="0" y="0" diameter="300" color="-7500403" filled="true" marked="true" /></shape><shape name="tren-str" rotatable="true" editableColorIndex="0"><rectangle startX="75" startY="0" endX="225" endY="300" color="-7500403" filled="true" marked="true" /></shape></turtleShapes><linkShapes>
+    <shape name="default" curviness="0.0">
+      <lines>
+        <line x="-0.2" visible="false">
+          <dash value="0.0" />
+          <dash value="1.0" />
+        </line>
+        <line x="0.0" visible="true">
+          <dash value="1.0" />
+          <dash value="0.0" />
+        </line>
+        <line x="0.2" visible="false">
+          <dash value="0.0" />
+          <dash value="1.0" />
+        </line>
+      </lines>
+      <indicator>
+        <shape name="link direction" rotatable="true" editableColorIndex="0">
+          <line endX="90" startY="150" marked="true" color="-1920102913" endY="180" startX="150" />
+          <line endX="210" startY="150" marked="true" color="-1920102913" endY="180" startX="150" />
+        </shape>
+      </indicator>
+    </shape>
+  </linkShapes>
+  <experiments /><previewCommands>setup
+repeat 25 [ go ]</previewCommands></model>
