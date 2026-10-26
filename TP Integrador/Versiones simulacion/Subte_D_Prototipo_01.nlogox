@@ -1,0 +1,158 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<model version="NetLogo 7.0.4" snapToGrid="true"><code>; STR - Prototipo 1. Recorrido didactico, no calibrado con la linea D.
+; Un tick representa un segundo SIMULADO.
+breed [estaciones estacion]
+breed [trenes tren]
+estaciones-own [orden nombre]
+trenes-own [estado sentido actual destino restante visitas vueltas]
+
+to setup
+  clear-all
+  ask patches [ set pcolor 9.5 ]
+  foreach [0 1 2] [ i -&gt;
+    create-estaciones 1 [
+      set orden i
+      set nombre item i ["Estacion A" "Estacion B" "Estacion C"]
+      setxy (-22 + 22 * i) 0
+      set shape "circle"
+      set size 1.8
+      set color green - 1
+      set label nombre
+      set label-color black
+    ]
+  ]
+  ask estaciones with [orden &lt; 2] [
+    let siguiente one-of estaciones with [orden = [orden] of myself + 1]
+    create-link-with siguiente [ set color gray set thickness 0.25 ]
+  ]
+  create-trenes 1 [
+    set shape "tren-str"
+    set size 3
+    set color blue
+    set actual 0
+    set destino 1
+    set sentido 1
+    set estado "DETENIDO"
+    set restante parada-seg
+    set visitas 0
+    set vueltas 0
+    move-to one-of estaciones with [orden = 0]
+    set ycor 1.8
+    set heading 90
+    set label "T1"
+    set label-color black
+  ]
+  reset-ticks
+end
+
+to go
+  if not any? trenes [ stop ]
+  ask trenes [ avanzar-tren ]
+  tick
+end
+
+to avanzar-tren
+  ifelse estado = "EN VIAJE" [
+    ; Interpolacion visual: la duracion, no el dibujo, gobierna el viaje.
+    let llegada one-of estaciones with [orden = [destino] of myself]
+    set xcor xcor + (([xcor] of llegada - xcor) / restante)
+    set restante restante - 1
+    if restante = 0 [
+      set actual destino
+      set estado "DETENIDO"
+      set restante parada-seg
+      set visitas visitas + 1
+      if actual = 0 [ set vueltas vueltas + 1 ]
+      set color blue
+    ]
+  ] [
+    set restante restante - 1
+    if restante = 0 [
+      ; En terminal invierte el sentido al terminar la detencion.
+      if actual = 2 [ set sentido -1 ]
+      if actual = 0 [ set sentido 1 ]
+      set destino actual + sentido
+      set heading ifelse-value (sentido = 1) [90] [270]
+      set estado "EN VIAJE"
+      set restante viaje-seg
+      set color orange
+    ]
+  ]
+end
+
+to-report estado-tren
+  if not any? trenes [ report "Pulsar Preparar" ]
+  report [estado] of one-of trenes
+end
+
+to-report ubicacion-tren
+  if not any? trenes [ report "-" ]
+  let t one-of trenes
+  let a [actual] of t
+  let d [destino] of t
+  if [estado] of t = "EN VIAJE" [
+    report (word item a ["A" "B" "C"] " -&gt; " item d ["A" "B" "C"])
+  ]
+  report (word "Estacion " item a ["A" "B" "C"])
+end
+
+to-report sentido-tren
+  if not any? trenes [ report "-" ]
+  report ifelse-value ([sentido] of one-of trenes = 1) ["Hacia C"] ["Hacia A"]
+end
+</code><widgets><view x="315" y="65" width="736" height="232" minPxcor="-30" maxPxcor="30" minPycor="-9" maxPycor="9" patchSize="12" fontSize="13" frameRate="30" wrappingAllowedX="false" wrappingAllowedY="false" showTickCounter="true" tickCounterLabel="Segundos simulados" updateMode="1" /><button x="20" y="75" width="135" height="40" display="Preparar / reiniciar" kind="Observer" forever="false" disableUntilTicks="false">setup</button><button x="165" y="75" width="130" height="40" display="Un segundo" kind="Observer" forever="false" disableUntilTicks="true">go</button><button x="20" y="125" width="135" height="40" display="Simular / pausar" kind="Observer" forever="true" disableUntilTicks="true">go</button><slider x="20" y="205" width="275" height="50" display="viaje-seg" variable="viaje-seg" min="1" max="120" step="1" default="30" direction="Horizontal" units="s" /><slider x="20" y="265" width="275" height="50" display="parada-seg" variable="parada-seg" min="1" max="60" step="1" default="10" direction="Horizontal" units="s" /><monitor x="315" y="320" width="170" height="60" display="Estado" precision="0" fontSize="12">estado-tren</monitor><monitor x="490" y="320" width="180" height="60" display="Ubicacion" precision="0" fontSize="12">ubicacion-tren</monitor><monitor x="675" y="320" width="170" height="60" display="Sentido" precision="0" fontSize="12">sentido-tren</monitor><monitor x="850" y="320" width="180" height="60" display="Restan (s)" precision="0" fontSize="12">ifelse-value any? trenes [[restante] of one-of trenes] [0]</monitor><monitor x="315" y="390" width="170" height="60" display="Llegadas" precision="0" fontSize="12">sum [visitas] of trenes</monitor><monitor x="490" y="390" width="180" height="60" display="Vueltas A-C-A" precision="0" fontSize="12">sum [vueltas] of trenes</monitor><note x="20" y="10" width="1030" height="45" fontSize="20" markdown="false" textColorLight="-16777216" textColorDark="-1" backgroundLight="0" backgroundDark="0">STR | Prototipo 1: tres estaciones y una formacion</note><note x="20" y="335" width="275" height="155" fontSize="13" markdown="false" textColorLight="-16777216" textColorDark="-1" backgroundLight="0" backgroundDark="0">1. Pulsar Preparar.
+2. Pulsar Un segundo o Simular.
+3. Volver a Simular para pausar.
+
+Azul: detenido. Naranja: en viaje.
+Un tick = un segundo simulado.</note><note x="680" y="395" width="360" height="90" fontSize="13" markdown="false" textColorLight="-16777216" textColorDark="-1" backgroundLight="0" backgroundDark="0">A, B y C son estaciones de prueba.
+Tiempos ilustrativos, no datos reales.
+Cambios de sliders: proxima fase.</note></widgets><info>## QUE REPRESENTA
+Prototipo didactico del proyecto de Sistemas de Tiempo Real. Tiene tres estaciones ficticias y una formacion que hace A-B-C-B-A repetidamente. No utiliza datos reales ni representa tiempos, distancias, maniobras o capacidad operativa de la linea D.
+
+## COMO USARLO
+1. En Interface, pulsar Preparar / reiniciar.
+2. Pulsar Un segundo para ejecutar exactamente un paso, o Simular / pausar para ejecutar continuamente. Pulsar este ultimo otra vez para pausar.
+3. El control general de velocidad de NetLogo cambia la velocidad de visualizacion, no los segundos simulados de viaje.
+4. Ajustar los sliders. Su valor se toma al comenzar la siguiente fase de viaje o detencion; para comenzar una prueba limpia, pausar y pulsar Preparar.
+
+## LO QUE SE VE
+Circulos verdes: estaciones fijas. Rectangulo T1 azul: tren detenido; naranja: tren en viaje. Los links grises representan las conexiones. El dibujo no esta a escala. El tren se dibuja ligeramente por encima de las estaciones para distinguir ambos elementos.
+Ubicacion indica la estacion actual o el tramo. Sentido indica el sentido actual o del ultimo tramo durante la detencion en terminal; se invierte al partir. Restan indica segundos para terminar la fase actual. Llegadas cuenta arribos posteriores a setup. Una vuelta es regresar a A despues de visitar C.
+
+## RELOJ Y EJEMPLO REPRODUCIBLE
+Un tick equivale a un segundo simulado. Valores iniciales: viaje 30 s y detencion 10 s en todas las estaciones, incluidas terminales. Son valores de prueba. Inicialmente el tren esta detenido en A.
+Con esos valores: t=10 parte de A; t=40 llega a B; t=50 parte de B; t=80 llega a C; t=90 parte hacia B; t=120 llega a B; t=130 parte hacia A; t=160 llega a A y completa una vuelta. No hay un tiempo adicional de maniobra.
+
+## COMO LEER CODE
+breed declara categorias de agentes. estaciones-own y trenes-own declaran atributos. setup crea el entorno y el tren. go ejecuta avanzar-tren y avanza el reloj. avanzar-tren actualiza estados y posicion. Los procedimientos to-report devuelven textos para monitores.
+Las estaciones son agentes fijos de implementacion; conceptualmente forman el entorno del proyecto.
+
+## PROXIMA ETAPA
+Agregar grupos de pasajeros, destinos, capacidad, colas y espera. Luego multiples trenes y frecuencia, y finalmente datos por estacion y horario. Este primer modelo todavia no permite evaluar frecuencia ni saturacion.
+</info><turtleShapes><shape name="default" rotatable="true" editableColorIndex="0"><polygon color="-7500403" filled="true" marked="true"><point x="150" y="5" /><point x="40" y="250" /><point x="150" y="205" /><point x="260" y="250" /></polygon></shape><shape name="circle" rotatable="true" editableColorIndex="0"><circle x="0" y="0" diameter="300" color="-7500403" filled="true" marked="true" /></shape><shape name="tren-str" rotatable="true" editableColorIndex="0"><rectangle startX="75" startY="0" endX="225" endY="300" color="-7500403" filled="true" marked="true" /></shape></turtleShapes><linkShapes>
+    <shape name="default" curviness="0.0">
+      <lines>
+        <line x="-0.2" visible="false">
+          <dash value="0.0" />
+          <dash value="1.0" />
+        </line>
+        <line x="0.0" visible="true">
+          <dash value="1.0" />
+          <dash value="0.0" />
+        </line>
+        <line x="0.2" visible="false">
+          <dash value="0.0" />
+          <dash value="1.0" />
+        </line>
+      </lines>
+      <indicator>
+        <shape name="link direction" rotatable="true" editableColorIndex="0">
+          <line endX="90" startY="150" marked="true" color="-1920102913" endY="180" startX="150" />
+          <line endX="210" startY="150" marked="true" color="-1920102913" endY="180" startX="150" />
+        </shape>
+      </indicator>
+    </shape>
+  </linkShapes>
+  <experiments /><previewCommands>setup
+repeat 25 [ go ]</previewCommands></model>

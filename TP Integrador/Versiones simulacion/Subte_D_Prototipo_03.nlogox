@@ -1,0 +1,774 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<model version="NetLogo 7.0.4" snapToGrid="true">
+  <code>; STR — Prototipo 3. Modelo didáctico, con datos ficticios.
+; Un tick = un segundo simulado. No depende de la velocidad de animación.
+breed [estaciones estacion]
+breed [trenes tren]
+breed [pasajeros pasajero]
+
+globals [
+  ingresados finalizados embarcados espera-acumulada secuencia-grupo
+  cfg-estaciones cfg-trenes cfg-tramo cfg-parada cfg-maniobra
+  cfg-capacidad cfg-intervalo cfg-semilla
+]
+estaciones-own [
+  e-orden e-nombre e-acumulador e-proxima-salida e-ultima-salida
+  e-salidas e-suma-intervalos e-cantidad-intervalos
+]
+trenes-own [
+  t-id t-estado t-sentido t-actual t-objetivo t-restante t-capacidad
+  t-listo-desde t-llegadas
+]
+pasajeros-own [
+  p-personas p-origen p-destino p-sentido p-instante p-prioridad
+  p-estado p-tren
+]
+
+; ---------- INICIALIZACIÓN ----------
+to setup
+  clear-all
+  set cfg-estaciones n-estaciones
+  set cfg-trenes n-trenes
+  set cfg-tramo viaje-seg
+  set cfg-parada parada-seg
+  set cfg-maniobra maniobra-seg
+  set cfg-capacidad capacidad-tren
+  set cfg-intervalo intervalo-seg
+  set cfg-semilla semilla
+  random-seed cfg-semilla
+  ask patches [ set pcolor 9.5 ]
+  ; Dos vías esquemáticas. Los segmentos no usan la distancia del dibujo.
+  ask patches with [abs pxcor &lt;= 42 and abs pycor = 3] [set pcolor gray]
+  foreach (range cfg-estaciones) [ indice-estacion -&gt;
+    create-estaciones 1 [
+      set e-orden indice-estacion
+      set e-nombre item indice-estacion ["A" "B" "C" "D" "E" "F" "G" "H" "I" "J"]
+      setxy (-42 + 84 * indice-estacion / (cfg-estaciones - 1)) 0
+      set shape "circle"
+      set size 1.4
+      set color green - 1
+      set label e-nombre
+      set label-color black
+      set e-proxima-salida cfg-parada
+      set e-ultima-salida -1
+    ]
+  ]
+  foreach (range cfg-trenes) [ indice-tren -&gt;
+    create-trenes 1 [
+      set t-id indice-tren + 1
+      set t-actual ifelse-value (indice-tren &lt; cfg-trenes / 2) [0] [cfg-estaciones - 1]
+      set t-sentido ifelse-value (t-actual = 0) [1] [-1]
+      set t-objetivo t-actual + t-sentido
+      set t-estado "LISTO"
+      set t-listo-desde 0
+      set t-capacidad cfg-capacidad
+      set shape "tren-str"
+      set size 2.2
+      set label-color black
+      ubicar-en-terminal
+    ]
+  ]
+  reset-ticks
+  actualizar-vista
+  comprobar-modelo
+end
+
+; ---------- ORDEN DE EVENTOS DEL SEGUNDO ----------
+to go
+  if not any? trenes [ stop ]
+  tick-advance 1
+  generar-pasajeros
+  ; Orden fijo para no introducir prioridad aleatoria entre trenes.
+  foreach sort-on [t-id] trenes [ formacion -&gt;
+    ask formacion [ avanzar-tren ]
+  ]
+  ; Las dos terminales despachan sobre vías distintas.
+  foreach (list 0 (cfg-estaciones - 1)) [ terminal-orden -&gt;
+    ask one-of estaciones with [e-orden = terminal-orden] [ despachar-terminal ]
+  ]
+  actualizar-vista
+  comprobar-modelo
+  update-plots
+end
+
+; ---------- DEMANDA Y DESTINOS DE PRUEBA ----------
+to generar-pasajeros
+  foreach sort-on [e-orden] estaciones [ punto-ingreso -&gt;
+    ask punto-ingreso [
+      set e-acumulador e-acumulador + demanda-min / 60
+      if ticks mod 10 = 0 [
+        let pendientes floor (e-acumulador + 0.000000001)
+        set e-acumulador max (list 0 (e-acumulador - pendientes))
+        ; Sorteo separado del transporte: con igual semilla y demanda,
+        ; los ingresos y destinos no cambian al modificar trenes o intervalo.
+        with-local-randomness [
+          random-seed ((cfg-semilla + ticks * 31 + e-orden * 104729) mod 2147483647)
+          while [pendientes &gt; 0] [
+            let cantidad-nueva min (list 5 pendientes)
+            let origen-nuevo e-orden
+            let destino-nuevo one-of (remove origen-nuevo (range cfg-estaciones))
+            set secuencia-grupo secuencia-grupo + 1
+            let prioridad-nueva secuencia-grupo
+            hatch-pasajeros 1 [
+              set p-personas cantidad-nueva
+              set p-origen origen-nuevo
+              set p-destino destino-nuevo
+              set p-sentido ifelse-value (destino-nuevo &gt; origen-nuevo) [1] [-1]
+              set p-instante ticks
+              set p-prioridad prioridad-nueva
+              set p-estado "ESPERANDO"
+              set p-tren nobody
+              set shape "circle"
+              set size 0.55
+              set label ""
+              hide-turtle
+            ]
+            set ingresados ingresados + cantidad-nueva
+            set pendientes pendientes - cantidad-nueva
+          ]
+        ]
+      ]
+    ]
+  ]
+end
+
+; ---------- MOVIMIENTO, PARADAS Y RETORNO ----------
+to avanzar-tren
+  ifelse t-estado = "VIAJANDO" [
+    let punto-destino one-of estaciones with [e-orden = [t-objetivo] of myself]
+    set xcor xcor + (([xcor] of punto-destino - xcor) / t-restante)
+    set t-restante t-restante - 1
+    if t-restante = 0 [
+      set t-actual t-objetivo
+      set t-llegadas t-llegadas + 1
+      descender-pasajeros
+      ifelse member? t-actual (list 0 (cfg-estaciones - 1)) [
+        ; Descenso total, maniobra y cambio a la vía de regreso.
+        set t-sentido (- t-sentido)
+        set t-objetivo t-actual + t-sentido
+        set t-estado "MANIOBRA"
+        set t-restante cfg-maniobra
+        ubicar-en-terminal
+      ] [
+        set t-estado "DETENIDO"
+        set t-restante cfg-parada
+        embarcar-pasajeros
+      ]
+    ]
+  ] [
+    ifelse t-estado = "DETENIDO" [
+      embarcar-pasajeros
+      set t-restante max (list 0 (t-restante - 1))
+      if t-restante = 0 [
+        set t-objetivo t-actual + t-sentido
+        if via-libre? [ iniciar-viaje ]
+      ]
+    ] [
+      if t-estado = "MANIOBRA" [
+        set t-restante t-restante - 1
+        if t-restante = 0 [
+          set t-estado "LISTO"
+          set t-listo-desde ticks
+        ]
+      ]
+    ]
+  ]
+end
+
+to despachar-terminal
+  if ticks &gt;= e-proxima-salida [
+    let terminal-local e-orden
+    let disponibles trenes with [t-actual = terminal-local and t-estado = "LISTO"]
+    if any? disponibles [
+      let ordenados sort-by [[uno dos] -&gt;
+        ifelse-value ([t-listo-desde] of uno = [t-listo-desde] of dos)
+          [[t-id] of uno &lt; [t-id] of dos]
+          [[t-listo-desde] of uno &lt; [t-listo-desde] of dos]
+      ] disponibles
+      let elegido first ordenados
+      if [via-libre?] of elegido [
+        ask elegido [
+          embarcar-pasajeros
+          iniciar-viaje
+        ]
+        if e-ultima-salida &gt;= 0 [
+          set e-suma-intervalos e-suma-intervalos + ticks - e-ultima-salida
+          set e-cantidad-intervalos e-cantidad-intervalos + 1
+        ]
+        set e-ultima-salida ticks
+        set e-salidas e-salidas + 1
+        ; Tras una demora no se despachan trenes de golpe para recuperar horarios.
+        set e-proxima-salida ticks + cfg-intervalo
+      ]
+    ]
+  ]
+end
+
+to iniciar-viaje
+  ; La salida siempre parte de la estación lógica actual, nunca del depósito.
+  let punto-salida one-of estaciones with [e-orden = [t-actual] of myself]
+  set xcor [xcor] of punto-salida
+  show-turtle
+  set t-estado "VIAJANDO"
+  set t-restante cfg-tramo
+  set heading ifelse-value (t-sentido = 1) [90] [270]
+  set ycor ifelse-value (t-sentido = 1) [3] [-3]
+end
+
+; Bloqueo conservador: un tren por tramo y reserva del andén siguiente.
+; No se aplica a los depósitos terminales, cuya maniobra es abstracta.
+to-report via-libre?
+  let direccion-local t-sentido
+  let origen-local t-actual
+  let destino-local t-objetivo
+  report not any? other trenes with [
+    t-sentido = direccion-local and
+    ((t-estado = "VIAJANDO" and t-actual = origen-local) or
+     (t-estado = "DETENIDO" and t-actual = destino-local))
+  ]
+end
+
+to ubicar-en-terminal
+  ; Depósito abstracto en la MISMA terminal. No se desplaza por el recorrido.
+  let punto-terminal one-of estaciones with [e-orden = [t-actual] of myself]
+  setxy [xcor] of punto-terminal (ifelse-value (t-actual = 0) [11] [-11])
+  set heading ifelse-value (t-sentido = 1) [90] [270]
+  ; Evita superponer las formaciones estacionadas sobre estaciones internas.
+  ; Siguen existiendo y se cuentan en los monitores Listos / Maniobra.
+  hide-turtle
+end
+
+; ---------- DESCENSO, FIFO Y CAPACIDAD ----------
+to descender-pasajeros
+  let tren-local self
+  let estacion-local t-actual
+  ask pasajeros with [p-tren = tren-local and p-destino = estacion-local] [
+    set finalizados finalizados + p-personas
+    die
+  ]
+end
+
+to embarcar-pasajeros
+  let tren-local self
+  let estacion-local t-actual
+  let direccion-local t-sentido
+  let libres t-capacidad - sum [p-personas] of pasajeros with [p-tren = tren-local]
+  let cola sort-by [[uno dos] -&gt;
+    ifelse-value ([p-instante] of uno = [p-instante] of dos)
+      [[p-prioridad] of uno &lt; [p-prioridad] of dos]
+      [[p-instante] of uno &lt; [p-instante] of dos]
+  ] pasajeros with [p-estado = "ESPERANDO" and p-origen = estacion-local and p-sentido = direccion-local]
+  foreach cola [ grupo-actual -&gt;
+    if libres &gt; 0 [
+      let cantidad-sube min (list libres [p-personas] of grupo-actual)
+      set espera-acumulada espera-acumulada + cantidad-sube * (ticks - [p-instante] of grupo-actual)
+      set embarcados embarcados + cantidad-sube
+      ask grupo-actual [
+        ifelse cantidad-sube = p-personas [
+          set p-estado "VIAJANDO"
+          set p-tren tren-local
+          hide-turtle
+        ] [
+          set p-personas p-personas - cantidad-sube
+          hatch-pasajeros 1 [
+            set p-personas cantidad-sube
+            set p-estado "VIAJANDO"
+            set p-tren tren-local
+            hide-turtle
+          ]
+        ]
+      ]
+      set libres libres - cantidad-sube
+    ]
+  ]
+end
+
+; ---------- REPRESENTACIÓN ----------
+to actualizar-vista
+  ; La representación no altera los sorteos de demanda.
+  with-local-randomness [
+    ask trenes [
+      let tren-local self
+      let ocupacion-local sum [p-personas] of pasajeros with [p-tren = tren-local]
+      set color ifelse-value (t-estado = "VIAJANDO") [orange]
+        [ifelse-value (t-estado = "MANIOBRA") [gray] [blue]]
+      set label ifelse-value (member? t-estado ["LISTO" "MANIOBRA"])
+        [(word "T" t-id ifelse-value (t-estado = "LISTO") [" L"] [" M"])]
+        [(word "T" t-id " " ocupacion-local "/" t-capacidad)]
+    ]
+    ask estaciones [
+      let origen-local e-orden
+      foreach [-1 1] [ direccion-local -&gt;
+        let cola sort-on [p-prioridad] pasajeros with [
+          p-estado = "ESPERANDO" and p-origen = origen-local and p-sentido = direccion-local
+        ]
+        let px-local xcor
+        let py-local ifelse-value (direccion-local = 1) [5] [-5]
+        let total-local sum [p-personas] of pasajeros with [
+          p-estado = "ESPERANDO" and p-origen = origen-local and p-sentido = direccion-local
+        ]
+        ask patch px-local py-local [
+          set plabel (word total-local " pers.")
+          set plabel-color black
+        ]
+        let indice-grupo 0
+        foreach cola [ grupo-actual -&gt;
+          ask grupo-actual [
+            ifelse indice-grupo &lt; 6 [
+              show-turtle
+              setxy (px-local - 1 + (indice-grupo mod 3))
+                (py-local + direccion-local * (1.5 + floor (indice-grupo / 3)))
+              set color ifelse-value (direccion-local = 1) [violet] [red]
+            ] [ hide-turtle ]
+          ]
+          set indice-grupo indice-grupo + 1
+        ]
+      ]
+    ]
+  ]
+end
+
+; ---------- MÉTRICAS ----------
+to-report esperando
+  report sum [p-personas] of pasajeros with [p-estado = "ESPERANDO"]
+end
+
+to-report a-bordo
+  report sum [p-personas] of pasajeros with [p-estado = "VIAJANDO"]
+end
+
+to-report espera-media
+  if embarcados = 0 [ report 0 ]
+  report espera-acumulada / embarcados
+end
+
+to-report espera-en-cola
+  if esperando = 0 [ report 0 ]
+  report sum [p-personas * (ticks - p-instante)] of pasajeros with [p-estado = "ESPERANDO"] / esperando
+end
+
+to-report balance
+  report ingresados - esperando - a-bordo - finalizados
+end
+
+to-report intervalo-real [orden-terminal]
+  let punto-terminal one-of estaciones with [e-orden = orden-terminal]
+  if punto-terminal = nobody [ report 0 ]
+  if [e-cantidad-intervalos] of punto-terminal = 0 [ report 0 ]
+  report [e-suma-intervalos / e-cantidad-intervalos] of punto-terminal
+end
+
+to-report demora-terminal [orden-terminal]
+  let punto-terminal one-of estaciones with [e-orden = orden-terminal]
+  if punto-terminal = nobody [ report 0 ]
+  report max (list 0 (ticks - [e-proxima-salida] of punto-terminal))
+end
+
+to-report ciclo-ideal
+  if cfg-estaciones = 0 [ report 0 ]
+  report 2 * ((cfg-estaciones - 1) * cfg-tramo + (cfg-estaciones - 2) * cfg-parada + cfg-maniobra)
+end
+
+to-report flota-orientativa
+  if cfg-intervalo = 0 [ report 0 ]
+  ; Redondeo a flota par por el reparto inicial entre terminales.
+  report 2 * ceiling (ciclo-ideal / (2 * cfg-intervalo))
+end
+
+; ---------- VERIFICACIÓN AUTOMÁTICA ----------
+to comprobar-modelo
+  if balance != 0 [ error "No se conserva la cantidad de personas." ]
+  if any? pasajeros with [p-personas &lt;= 0 or p-personas != floor p-personas] [
+    error "Un grupo tiene una cantidad inválida."
+  ]
+  if any? pasajeros with [p-origen = p-destino or p-instante &gt; ticks] [
+    error "Origen, destino o llegada inválidos."
+  ]
+  if any? pasajeros with [p-estado = "ESPERANDO" and p-tren != nobody] [
+    error "Un grupo en espera tiene tren asignado."
+  ]
+  if any? pasajeros with [p-estado = "VIAJANDO" and p-tren = nobody] [
+    error "Un grupo a bordo no tiene tren."
+  ]
+  if count trenes != cfg-trenes [ error "Se modificó la flota durante la ejecución." ]
+  ask trenes [
+    let tren-local self
+    let estacion-local t-actual
+    let destino-local t-objetivo
+    let direccion-local t-sentido
+    if sum [p-personas] of pasajeros with [p-tren = tren-local] &gt; t-capacidad [
+      error "Un tren superó su capacidad."
+    ]
+    if member? t-estado ["LISTO" "MANIOBRA"] [
+      if any? pasajeros with [p-tren = tren-local] [ error "Hay pasajeros en maniobra o depósito." ]
+    ]
+    if member? t-estado ["LISTO" "MANIOBRA"] [
+      if not member? t-actual (list 0 (cfg-estaciones - 1)) [
+        error "Una formación en depósito no está en una terminal."
+      ]
+      let x-terminal [xcor] of one-of estaciones with [e-orden = estacion-local]
+      if abs (xcor - x-terminal) &gt; 0.000001 or not hidden? [
+        error "Posición o visibilidad incorrecta en depósito terminal."
+      ]
+    ]
+    if t-estado = "VIAJANDO" [
+      let x-origen [xcor] of one-of estaciones with [e-orden = estacion-local]
+      let x-destino [xcor] of one-of estaciones with [e-orden = destino-local]
+      let x-esperada x-origen + (x-destino - x-origen) * (1 - t-restante / cfg-tramo)
+      if abs (xcor - x-esperada) &gt; 0.000001 [
+        error "El tren no sigue el tramo desde su estación de salida."
+      ]
+      if hidden? or ycor != ifelse-value (direccion-local = 1) [3] [-3] [
+        error "Visibilidad o vía incorrecta durante el viaje."
+      ]
+      if t-restante &lt;= 0 [ error "Tiempo de viaje inválido." ]
+      if any? other trenes with [t-estado = "VIAJANDO" and t-actual = estacion-local and t-sentido = direccion-local] [
+        error "Dos trenes ocupan el mismo tramo y sentido."
+      ]
+      if any? other trenes with [t-estado = "DETENIDO" and t-actual = destino-local and t-sentido = direccion-local] [
+        error "Un tren viaja hacia un andén ocupado."
+      ]
+    ]
+    if t-estado = "DETENIDO" [
+      if any? other trenes with [t-estado = "DETENIDO" and t-actual = estacion-local and t-sentido = direccion-local] [
+        error "Dos trenes ocupan el mismo andén."
+      ]
+    ]
+    if any? pasajeros with [p-tren = tren-local and p-sentido != direccion-local] [
+      error "Pasajeros a bordo en sentido incorrecto."
+    ]
+  ]
+end
+</code>
+  <widgets>
+    <view x="320" y="65" width="913" height="265" minPxcor="-50" maxPxcor="50" minPycor="-14" maxPycor="14" patchSize="9" fontSize="12" frameRate="30" wrappingAllowedX="false" wrappingAllowedY="false" showTickCounter="true" tickCounterLabel="Segundos simulados" updateMode="1" />
+    <note x="15" y="10" width="1220" height="40" fontSize="22" markdown="false" textColorLight="-16777216" textColorDark="-1" backgroundLight="0" backgroundDark="0">STR | Prototipo 3: dos vías, flota e intervalo entre salidas</note>
+    <button x="15" y="65" width="150" height="40" display="Preparar / reiniciar" kind="Observer" forever="false" disableUntilTicks="false">setup</button>
+    <button x="175" y="65" width="130" height="40" display="Un segundo" kind="Observer" forever="false" disableUntilTicks="true">go</button>
+    <button x="15" y="115" width="150" height="40" display="Simular / pausar" kind="Observer" forever="true" disableUntilTicks="true">go</button>
+    <button x="175" y="115" width="130" height="40" display="Avanzar 60 s" kind="Observer" forever="false" disableUntilTicks="true">repeat 60 [ go ]</button>
+    <slider x="15" y="180" width="290" height="50" display="n-estaciones" variable="n-estaciones" min="3" max="10" step="1" default="5" direction="Horizontal" units="estaciones" />
+    <slider x="15" y="238" width="290" height="50" display="n-trenes" variable="n-trenes" min="2" max="16" step="2" default="8" direction="Horizontal" units="formaciones" />
+    <slider x="15" y="296" width="290" height="50" display="intervalo-seg" variable="intervalo-seg" min="10" max="240" step="10" default="60" direction="Horizontal" units="s" />
+    <slider x="15" y="354" width="290" height="50" display="viaje-seg" variable="viaje-seg" min="5" max="120" step="5" default="30" direction="Horizontal" units="s" />
+    <slider x="15" y="412" width="290" height="50" display="parada-seg" variable="parada-seg" min="1" max="60" step="1" default="10" direction="Horizontal" units="s" />
+    <slider x="15" y="470" width="290" height="50" display="maniobra-seg" variable="maniobra-seg" min="1" max="120" step="1" default="20" direction="Horizontal" units="s" />
+    <slider x="15" y="528" width="290" height="50" display="capacidad-tren" variable="capacidad-tren" min="1" max="300" step="1" default="60" direction="Horizontal" units="personas" />
+    <slider x="15" y="586" width="290" height="50" display="demanda-min" variable="demanda-min" min="0" max="120" step="1" default="12" direction="Horizontal" units="pers/min/estación" />
+    <slider x="15" y="644" width="290" height="50" display="semilla" variable="semilla" min="1" max="100" step="1" default="1" direction="Horizontal" units="" />
+    <note x="15" y="710" width="290" height="130" fontSize="12" markdown="false" textColorLight="-16777216" textColorDark="-1" backgroundLight="0" backgroundDark="0">Aplicar cambios: Preparar.
+Solo demanda-min cambia en marcha.
+
+Violeta: hacia la última estación.
+Rojo: hacia A.
+Datos y tiempos de prueba.</note>
+    <note x="320" y="335" width="913" height="45" fontSize="12" markdown="false" textColorLight="-16777216" textColorDark="-1" backgroundLight="0" backgroundDark="0">Arriba: A → última. Abajo: última → A. Naranja: viaje; azul: parada. Listos y maniobras: ocultos en terminal.
+Cada punto representa hasta 5 personas. Se dibujan hasta 6 grupos por cola; los totales incluyen a todos.</note>
+    <monitor x="320" y="390" width="215" height="60" display="Ingresados" precision="0" fontSize="12">ingresados</monitor>
+    <monitor x="550" y="390" width="215" height="60" display="Esperando" precision="0" fontSize="12">esperando</monitor>
+    <monitor x="780" y="390" width="215" height="60" display="A bordo" precision="0" fontSize="12">a-bordo</monitor>
+    <monitor x="1010" y="390" width="215" height="60" display="Finalizados" precision="0" fontSize="12">finalizados</monitor>
+    <monitor x="320" y="460" width="215" height="60" display="Espera al subir (s)" precision="1" fontSize="12">espera-media</monitor>
+    <monitor x="550" y="460" width="215" height="60" display="Espera cola actual (s)" precision="1" fontSize="12">espera-en-cola</monitor>
+    <monitor x="780" y="460" width="215" height="60" display="Balance = 0" precision="0" fontSize="12">balance</monitor>
+    <monitor x="1010" y="460" width="215" height="60" display="En viaje / Listos / Maniobra" precision="0" fontSize="12">(word count trenes with [t-estado = "VIAJANDO"] " / " count trenes with [t-estado = "LISTO"] " / " count trenes with [t-estado = "MANIOBRA"])</monitor>
+    <monitor x="320" y="530" width="215" height="60" display="Intervalo real A (s)" precision="1" fontSize="12">intervalo-real 0</monitor>
+    <monitor x="550" y="530" width="215" height="60" display="Intervalo real última (s)" precision="1" fontSize="12">intervalo-real (cfg-estaciones - 1)</monitor>
+    <monitor x="780" y="530" width="215" height="60" display="Demora A / última (s)" precision="0" fontSize="12">(word demora-terminal 0 " / " demora-terminal (cfg-estaciones - 1))</monitor>
+    <monitor x="1010" y="530" width="215" height="60" display="Flota orientativa / actual" precision="0" fontSize="12">(word flota-orientativa " / " count trenes)</monitor>
+    <plot x="320" y="615" width="448" height="220" display="Personas" xMin="0.0" xMax="300.0" yMin="0.0" yMax="20.0" autoPlotX="true" autoPlotY="true" legend="true" xAxis="Tiempo (s)" yAxis="Personas">
+      <setup />
+      <update />
+      <pen display="Esperando" interval="1.0" mode="0" color="-8630108" legend="true">
+        <setup />
+        <update>plot esperando</update>
+      </pen>
+      <pen display="A bordo" interval="1.0" mode="0" color="-13345367" legend="true">
+        <setup />
+        <update>plot a-bordo</update>
+      </pen>
+    </plot>
+    <plot x="785" y="615" width="448" height="220" display="Espera" xMin="0.0" xMax="300.0" yMin="0.0" yMax="20.0" autoPlotX="true" autoPlotY="true" legend="true" xAxis="Tiempo (s)" yAxis="Segundos">
+      <setup />
+      <update />
+      <pen display="Al subir" interval="1.0" mode="0" color="-10899396" legend="true">
+        <setup />
+        <update>plot espera-media</update>
+      </pen>
+      <pen display="Cola actual" interval="1.0" mode="0" color="-2674135" legend="true">
+        <setup />
+        <update>plot espera-en-cola</update>
+      </pen>
+    </plot>
+  </widgets>
+  <info>## PROPÓSITO Y ALCANCE
+
+- **Pregunta del proyecto:** ¿cómo cambia la espera, la ocupación de los trenes y la acumulación de pasajeros al modificar el intervalo entre salidas?
+- **Este avance:** incorpora dos vías, varias formaciones, maniobras en las terminales y restricciones simples de circulación.
+- **Estaciones:** entre 3 y 10 estaciones ficticias, identificadas de A a J. La última letra depende de la cantidad elegida.
+- **Datos:** tiempos, demanda y capacidad de prueba. Todavía no se representa la línea D real.
+- **Evento masivo:** se mantiene como objetivo secundario; no está implementado.
+
+## CÓMO EJECUTARLO
+
+1. Elegí los valores de los deslizadores.
+2. Pulsá **Preparar / reiniciar**. Se crean las estaciones y una flota fija, inicialmente repartida por mitades entre las terminales.
+3. Pulsá **Un segundo** para avanzar un tick.
+4. Pulsá **Simular / pausar** para iniciar o detener la ejecución continua.
+5. El botón **Avanzar 60 s** ejecuta 60 pasos. Conviene usarlo con la ejecución continua pausada.
+6. Para comenzar otra comparación, pausá, cambiá los parámetros y pulsá Preparar.
+
+- Un **tick** equivale a un segundo simulado.
+- El control general de velocidad de NetLogo cambia la velocidad de visualización; no modifica las duraciones simuladas.
+- **Todos los controles requieren Preparar, excepto demanda-min.** Los valores usados se guardan al inicializar: mover otro deslizador durante una ejecución no altera ese escenario.
+- Las primeras salidas se intentan en ambas terminales al cumplirse parada-seg desde el inicio.
+
+## CONTROLES
+
+- **n-estaciones:** cantidad de estaciones. Incluye las dos terminales.
+- **n-trenes:** cantidad TOTAL de formaciones. Se admiten valores pares, para repartirlas inicialmente entre ambas terminales.
+- **intervalo-seg:** intervalo mínimo deseado entre salidas sucesivas de UNA MISMA terminal. Un valor menor significa mayor frecuencia.
+- **viaje-seg:** tiempo de recorrido de cada tramo.
+- **parada-seg:** tiempo mínimo de detención en estaciones intermedias. También establece el instante de las primeras salidas.
+- **maniobra-seg:** tiempo de preparación en una terminal antes de poder regresar.
+- **capacidad-tren:** personas máximas por formación, incluyendo sentadas y de pie.
+- **demanda-min:** personas por minuto POR ESTACIÓN. En este prototipo, todas reciben la misma demanda. Se puede modificar durante la ejecución; cero detiene la acumulación de nuevas entradas.
+- **semilla:** permite repetir los sorteos de destinos. Con igual cantidad de estaciones, semilla e historia de demanda, se generan los mismos grupos y destinos al comparar distintas flotas o intervalos.
+
+## CÓMO LEER EL DIBUJO
+
+- **Vía superior:** circulación desde A hacia la última estación.
+- **Vía inferior:** circulación desde la última estación hacia A.
+- **Círculos verdes y letras:** estaciones, dibujadas entre las dos vías.
+- **Cantidades junto a cada vía:** personas esperando en esa estación y sentido; incluyen TODOS los grupos.
+- **Puntos violetas:** grupos esperando hacia la última estación.
+- **Puntos rojos:** grupos esperando hacia A.
+- **Cada punto:** entre 1 y 5 personas, con el mismo origen, destino e instante de llegada.
+- **Límite visual:** se dibujan hasta seis grupos por cola. Los demás siguen existiendo y se incluyen en los indicadores.
+- **Tren naranja:** viajando.
+- **Tren azul en la vía:** detenido en una estación.
+- **Formaciones en depósito o maniobra:** se ocultan para evitar superposiciones. Siguen en su terminal y se cuentan en los monitores Listos / Maniobra.
+- **Etiqueta en servicio:** identificador y ocupación/capacidad; por ejemplo, T3 18/60.
+- Al despacharse, cada formación aparece exactamente en la terminal de la que parte, sobre la vía de su nuevo sentido.
+- Las posiciones y separaciones del dibujo son esquemáticas; no representan distancias reales ni superficie útil de andenes.
+
+## CIRCULACIÓN DE IDA Y VUELTA
+
+- Cada formación conserva su identificador durante toda la ejecución.
+- Recorre las estaciones en orden y atiende únicamente la cola de su sentido.
+- Al llegar a una estación intermedia, primero descienden quienes llegaron a destino. Luego suben quienes esperan, hasta completar la capacidad.
+- El ascenso también se permite durante la detención.
+- En la última estación del sentido actual, descienden todos los pasajeros restantes.
+- La formación llega al extremo, se oculta y pasa a MANIOBRA en esa misma terminal. Se invierte su sentido para la próxima salida.
+- Al salir, reaparece exactamente en esa terminal: A para el sentido creciente, o la última estación para el regreso. Nunca aparece en una estación intermedia.
+- Una vez cumplido maniobra-seg, queda LISTA en esa terminal.
+- Puede volver a salir cuando corresponda y esté libre el primer tramo.
+- No reaparece instantáneamente en la terminal opuesta, no desaparece y no se crean trenes nuevos durante go.
+- La maniobra y el estacionamiento son abstractos: no se modelan cambios de vía, agujas ni capacidad de depósitos.
+
+## INTERVALO, FRECUENCIA Y DISPONIBILIDAD
+
+- El intervalo se controla por tiempo transcurrido, no por el número de estaciones alcanzadas por otro tren.
+- Pueden circular varios trenes hacia el mismo destino, ocupando distintos tramos.
+- Un tren sale de una terminal si se cumplen tres condiciones: ya corresponde la salida, hay una formación lista y el primer tramo está disponible.
+- Si alguna condición falla, la salida espera. El contador Demora indica cuánto lleva pendiente la siguiente salida.
+- Después de una demora, la siguiente oportunidad se programa desde la salida efectivamente realizada. No se despachan varias formaciones juntas para recuperar horarios.
+- **Intervalo real:** promedio de los intervalos entre salidas efectivamente realizadas por terminal. Vale cero hasta completar dos salidas.
+- Pedir un intervalo menor no garantiza conseguirlo: puede faltar flota o limitar la circulación.
+- Como referencia, sin bloqueos, la vuelta completa dura:
+
+    ciclo = 2 × [(N − 1) × viaje + (N − 2) × parada + maniobra]
+
+- El monitor **Flota orientativa** redondea ciclo/intervalo al siguiente número par. Es una estimación por tiempo de ciclo y reparto inicial; no garantiza factibilidad ni reemplaza la simulación.
+- Con los valores iniciales, N = 5, viaje = 30 s, parada = 10 s y maniobra = 20 s: el ciclo ideal es 340 s.
+
+## BLOQUEO SIMPLE: SIN ADELANTAMIENTOS
+
+- Cada tramo admite como máximo un tren por sentido.
+- Un tren no inicia un tramo si el andén siguiente, en ese sentido, está ocupado.
+- Un tren detenido mantiene su lugar hasta poder continuar; mientras tanto puede seguir recibiendo pasajeros.
+- Los trenes opuestos usan vías distintas y pueden cruzarse.
+- Esta regla es conservadora: puede reducir la frecuencia alcanzable.
+- No representa el señalamiento real de la línea D, distancias de frenado ni una evaluación de seguridad ferroviaria.
+
+## PASAJEROS Y COLAS
+
+- La demanda se acumula cada segundo y se convierte en personas enteras cada diez segundos. Las fracciones se conservan para el siguiente lote.
+- El instante de llegada de un grupo es el de su creación; no se contabiliza una espera anterior a ese instante.
+- Cada grupo elige su destino entre las otras estaciones, con igual probabilidad. Es una hipótesis de prueba, pendiente de reemplazar por los pesos territoriales y horarios acordados.
+- El destino se asigna una sola vez, al crear el grupo.
+- El sentido se determina a partir del origen y el destino.
+- La cola se atiende por instante de llegada. Los empates se resuelven con un número de prioridad asignado al ingresar.
+- Si el grupo no entra completo, se divide: una parte sube y el resto conserva su destino, instante de llegada y prioridad.
+- Si no hay capacidad, permanece esperando al siguiente tren.
+- Los pasajeros a bordo se ocultan visualmente; siguen existiendo y se cuentan.
+- Al finalizar el viaje, sus personas se agregan a Finalizados y se elimina el agente para ahorrar memoria.
+- Ascenso y descenso son instantáneos dentro de cada paso. La cantidad de pasajeros no modifica el tiempo de parada.
+
+## INDICADORES Y GRÁFICOS
+
+- **Ingresados:** personas creadas. No incluye fracciones pendientes de generación.
+- **Esperando:** personas en todas las colas.
+- **A bordo:** personas transportadas por todas las formaciones en ese instante.
+- **Finalizados:** personas que descendieron en su destino.
+- **Espera al subir:** espera media acumulada de quienes ya embarcaron, ponderada por personas. No incluye la espera incompleta de quienes siguen en cola.
+- **Espera cola actual:** tiempo medio que llevan esperando las personas presentes en las colas. Complementa la métrica anterior.
+- **Balance:** ingresados − esperando − a bordo − finalizados. Debe valer cero.
+- **En viaje / Listos / Maniobra:** cantidad de trenes en cada uno de esos estados. Las formaciones detenidas en estaciones intermedias completan la flota.
+- **Intervalo real A / última:** promedio de intervalos realizados en cada terminal.
+- **Demora A / última:** retraso de la próxima salida respecto de su instante previsto; cero si todavía no corresponde salir.
+- **Gráfico Personas:** muestra la evolución de quienes esperan y quienes están a bordo.
+- **Gráfico Espera:** muestra la espera media al subir y el tiempo medio en la cola actual.
+- Los contadores y promedios abarcan toda la ejecución desde Preparar. El modelo comienza con trenes y estaciones vacíos; esa fase inicial influye en los resultados.
+
+## PRIMERAS PRUEBAS
+
+1. **Ver dos sentidos:** dejá los valores iniciales y ejecutá. A los 10 s salen dos trenes, uno de cada terminal.
+2. **Ver varios trenes en el mismo sentido:** continuá. Las siguientes salidas se intentan 60 s después de las primeras; las formaciones anteriores siguen recorriendo la línea.
+3. **Comparar intervalos:** ejecutá 1.800 s con intervalo-seg = 120. Anotá esperas, cola e intervalos reales. Reiniciá con 60, manteniendo el resto y la semilla, y ejecutá el mismo tiempo.
+4. **Comprobar el límite de flota:** elegí n-trenes = 2 e intervalo-seg = 30; reiniciá. Observá las demoras y el intervalo real cuando las formaciones todavía no regresaron.
+5. **Comprobar capacidad y división:** elegí capacidad-tren = 7 y una demanda elevada; reiniciá. La ocupación no debe superar siete y Balance debe permanecer en cero.
+6. **Vaciar las colas:** durante una ejecución, poné demanda-min = 0. Sin nuevas entradas, las formaciones deben terminar transportando a todos los pasajeros, con tiempo suficiente.
+7. **Ampliar el recorrido:** elegí n-estaciones = 10 y reiniciá. Los destinos y recorridos se adaptan a A–J.
+
+## EXPERIMENTO INCLUIDO EN BEHAVIORSPACE
+
+- Nombre: **Comparar intervalos**.
+- Acceso: Tools → BehaviorSpace; seleccioná el experimento y ejecutalo.
+- Compara intervalos de 60 y 120 segundos, con semillas 1, 2 y 3: seis ejecuciones.
+- Cada ejecución dura 1.800 segundos, con cinco estaciones, ocho trenes y los demás parámetros de prueba establecidos en el experimento.
+- Registra cola final, personas a bordo, finalizados, espera media, intervalo real y balance.
+- BehaviorSpace puede dejar los controles con los valores del último escenario. Pulsá Preparar antes de volver a usar la interfaz.
+- Es un ejemplo didáctico de comparación, no una calibración ni una conclusión sobre el servicio real.
+
+## ORDEN DE EJECUCIÓN Y CÓDIGO
+
+- **setup:** guarda la configuración, crea estaciones y distribuye la flota.
+- **go:** avanza el reloj, genera pasajeros, actualiza trenes, despacha terminales y comprueba reglas.
+- **generar-pasajeros:** convierte demanda en grupos, asigna destinos y conserva fracciones.
+- **avanzar-tren:** resuelve viaje, llegada, detención y maniobra.
+- **despachar-terminal:** aplica el intervalo y la disponibilidad de formaciones.
+- **via-libre?:** comprueba tramo y andén siguiente.
+- **descender-pasajeros / embarcar-pasajeros:** aplican destinos, orden de cola, capacidad y división de grupos.
+- **actualizar-vista:** dibuja trenes, grupos y cantidades. Sus operaciones aleatorias están aisladas de la demanda.
+- **comprobar-modelo:** detiene la simulación con un error si falla una regla de conservación, capacidad, asignación, sentido o exclusión de tramos y andenes.
+- Dentro de un segundo, los trenes se procesan por identificador. Esta convención resuelve eventos simultáneos y puede introducir diferencias de hasta un paso en la liberación de un tramo.
+- Las estaciones son agentes fijos en la implementación; conceptualmente constituyen el entorno del proyecto.
+
+## LÍMITES Y SIGUIENTE ETAPA
+
+- Todavía no se incluyen estaciones reales, datos de molinetes, perfiles de horario, pesos territoriales, transbordos ni eventos masivos.
+- No se incluyen áreas de andén ni umbrales de densidad o seguridad.
+- No se modelan fallas, demoras aleatorias ni tiempos de parada dependientes del flujo de pasajeros.
+- El siguiente avance puede reemplazar el recorrido ficticio por la línea D y preparar los ingresos por estación y horario, conservando esta mecánica.
+
+## COMPROBACIONES REALIZADAS PARA ESTA ENTREGA
+
+- Compilación y ejecución con NetLogo 7.0.4, en modo headless.
+- Seis escenarios de comparación: intervalos de 60 y 120 s, con tres semillas y 1.800 pasos por ejecución.
+- Ocho escenarios de carga: 3 o 10 estaciones, 2 o 16 trenes, intervalos de 10 o 60 s y capacidad de 7 personas.
+- Prueba sin demanda y prueba de reinicio.
+- Prueba de vaciado: después de detener las entradas, las 600 personas ingresadas terminaron su viaje; no quedaron personas esperando ni a bordo.
+- Balance igual a cero y comprobaciones automáticas activas en todas esas ejecuciones.
+- Revisión de una vista exportada del modelo. La prueba headless no sustituye una revisión de toda la interfaz en el escritorio del usuario.
+
+## CORRECCIÓN DE POSICIONES EN TERMINALES
+
+- Se eliminó el desplazamiento horizontal usado para dibujar el estacionamiento: podía hacer que una salida pareciera comenzar en una estación interna o moverse en reversa.
+- El inicio de cada tramo fija explícitamente la posición en la estación de salida.
+- Los trenes en maniobra o listos se mantienen ocultos en su terminal; no se trasladan a la terminal opuesta.
+- Con diez estaciones, cada formación recorre A → B → … → J, realiza la maniobra en J y regresa J → … → A por la otra vía.
+- Se comprueba automáticamente que la posición dibujada coincida con el tramo y el tiempo restante en cada paso, además de las reglas anteriores.
+</info>
+  <turtleShapes>
+    <shape name="default" rotatable="true" editableColorIndex="0">
+      <polygon color="-7500403" filled="true" marked="true">
+        <point x="150" y="5" />
+        <point x="40" y="250" />
+        <point x="150" y="205" />
+        <point x="260" y="250" />
+      </polygon>
+    </shape>
+    <shape name="circle" rotatable="true" editableColorIndex="0">
+      <circle x="0" y="0" diameter="300" color="-7500403" filled="true" marked="true" />
+    </shape>
+    <shape name="tren-str" rotatable="true" editableColorIndex="0">
+      <rectangle startX="75" startY="0" endX="225" endY="300" color="-7500403" filled="true" marked="true" />
+    </shape>
+  </turtleShapes>
+  <linkShapes>
+    <shape name="default" curviness="0.0">
+      <lines>
+        <line x="-0.2" visible="false">
+          <dash value="0.0" />
+          <dash value="1.0" />
+        </line>
+        <line x="0.0" visible="true">
+          <dash value="1.0" />
+          <dash value="0.0" />
+        </line>
+        <line x="0.2" visible="false">
+          <dash value="0.0" />
+          <dash value="1.0" />
+        </line>
+      </lines>
+      <indicator>
+        <shape name="link direction" rotatable="true" editableColorIndex="0">
+          <line endX="90" startY="150" marked="true" color="-1920102913" endY="180" startX="150" />
+          <line endX="210" startY="150" marked="true" color="-1920102913" endY="180" startX="150" />
+        </shape>
+      </indicator>
+    </shape>
+  </linkShapes>
+  <experiments>
+    <experiment name="Comparar intervalos" repetitions="1" runMetricsEveryStep="false" sequentialRunOrder="true" timeLimit="1800">
+      <setup>setup</setup>
+      <go>go</go>
+      <metrics>
+        <metric>ingresados</metric>
+        <metric>esperando</metric>
+        <metric>a-bordo</metric>
+        <metric>finalizados</metric>
+        <metric>espera-media</metric>
+        <metric>espera-en-cola</metric>
+        <metric>intervalo-real 0</metric>
+        <metric>intervalo-real (cfg-estaciones - 1)</metric>
+        <metric>balance</metric>
+      </metrics>
+      <constants>
+        <enumeratedValueSet variable="n-estaciones">
+          <value value="5" />
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="n-trenes">
+          <value value="8" />
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="intervalo-seg">
+          <value value="60" />
+          <value value="120" />
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="viaje-seg">
+          <value value="30" />
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="parada-seg">
+          <value value="10" />
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="maniobra-seg">
+          <value value="20" />
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="capacidad-tren">
+          <value value="60" />
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="demanda-min">
+          <value value="12" />
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="semilla">
+          <value value="1" />
+          <value value="2" />
+          <value value="3" />
+        </enumeratedValueSet>
+      </constants>
+    </experiment>
+  </experiments>
+  <previewCommands>setup
+repeat 150 [ go ]</previewCommands>
+</model>
