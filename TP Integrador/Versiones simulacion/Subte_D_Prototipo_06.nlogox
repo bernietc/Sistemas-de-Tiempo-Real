@@ -1,0 +1,930 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<model version="NetLogo 7.0.4" snapToGrid="true">
+  <code>; STR — Prototipo 6. Ingresos por estación de molinetes de mayo de 2025.
+; Un tick = un segundo simulado. No depende de la velocidad de animación.
+breed [estaciones estacion]
+breed [trenes tren]
+breed [pasajeros pasajero]
+breed [rotulos rotulo]
+breed [rotulos-trenes rotulo-tren]
+rotulos-trenes-own [rt-tren]
+rotulos-own [r-estacion r-sentido r-tipo]
+
+globals [
+  nombres-linea posiciones-linea etiquetas-linea normales-linea rutas-ida rutas-vuelta datos-ingreso tasas-ingreso
+  ingresados finalizados embarcados espera-acumulada secuencia-grupo
+  cfg-estaciones cfg-trenes cfg-tramo cfg-parada cfg-maniobra
+  cfg-capacidad cfg-intervalo cfg-semilla
+]
+estaciones-own [
+  e-orden e-nombre e-acumulador e-proxima-salida e-ultima-salida
+  e-salidas e-suma-intervalos e-cantidad-intervalos
+]
+trenes-own [
+  t-id t-estado t-sentido t-actual t-objetivo t-restante t-capacidad
+  t-listo-desde t-llegadas
+]
+pasajeros-own [
+  p-personas p-origen p-destino p-sentido p-instante p-prioridad
+  p-estado p-tren
+]
+
+; ---------- INICIALIZACIÓN ----------
+to setup
+  clear-all
+  cargar-linea-d
+  cargar-demanda-real
+  set cfg-estaciones length nombres-linea
+  set cfg-trenes n-trenes
+  set cfg-tramo viaje-seg
+  set cfg-parada parada-seg
+  set cfg-maniobra maniobra-seg
+  set cfg-capacidad capacidad-tren
+  set cfg-intervalo intervalo-seg
+  set cfg-semilla semilla
+  random-seed cfg-semilla
+  ask patches [ set pcolor [247 249 247] ]
+  foreach (range cfg-estaciones) [ indice-estacion -&gt;
+    create-estaciones 1 [
+      set e-orden indice-estacion
+      set e-nombre item indice-estacion nombres-linea
+      setxy (item 0 (item indice-estacion posiciones-linea)) (item 1 (item indice-estacion posiciones-linea))
+      set shape "circle"
+      set size 1.4
+      set color green - 1
+      set label ""
+      set label-color black
+      set e-proxima-salida cfg-parada
+      set e-ultima-salida -1
+    ]
+  ]
+  comprobar-geometria
+  dibujar-linea
+  foreach (range cfg-trenes) [ indice-tren -&gt;
+    create-trenes 1 [
+      set t-id indice-tren + 1
+      set t-actual ifelse-value (indice-tren &lt; cfg-trenes / 2) [0] [cfg-estaciones - 1]
+      set t-sentido ifelse-value (t-actual = 0) [1] [-1]
+      set t-objetivo t-actual + t-sentido
+      set t-estado "LISTO"
+      set t-listo-desde 0
+      set t-capacidad cfg-capacidad
+      set shape "tren-str"
+      set size 1.9
+      set label-color black
+      ubicar-en-terminal
+    ]
+  ]
+  foreach sort-on [t-id] trenes [ formacion -&gt;
+    create-rotulos-trenes 1 [
+      set rt-tren formacion
+      set size 0
+      set label-color [28 43 37]
+    ]
+  ]
+  foreach (range cfg-estaciones) [ indice-estacion -&gt;
+    foreach [-1 1] [ direccion-cola -&gt;
+      create-rotulos 1 [
+        set r-tipo "COLA"
+        set r-estacion indice-estacion
+        set r-sentido direccion-cola
+        set size 0
+        set label-color ifelse-value (direccion-cola = 1) [violet - 1] [red - 1]
+      ]
+    ]
+  ]
+  reset-ticks
+  actualizar-vista
+  comprobar-modelo
+end
+
+; ---------- ORDEN DE EVENTOS DEL SEGUNDO ----------
+to go
+  if not any? trenes [ stop ]
+  tick-advance 1
+  generar-pasajeros
+  ; Orden fijo para no introducir prioridad aleatoria entre trenes.
+  foreach sort-on [t-id] trenes [ formacion -&gt;
+    ask formacion [ avanzar-tren ]
+  ]
+  ; Las dos terminales despachan sobre vías distintas.
+  foreach (list 0 (cfg-estaciones - 1)) [ terminal-orden -&gt;
+    ask one-of estaciones with [e-orden = terminal-orden] [ despachar-terminal ]
+  ]
+  actualizar-vista
+  comprobar-modelo
+  update-plots
+end
+
+; ---------- DEMANDA Y DESTINOS DE PRUEBA ----------
+to generar-pasajeros
+  foreach sort-on [e-orden] estaciones [ punto-ingreso -&gt;
+    ask punto-ingreso [
+      set e-acumulador e-acumulador + (item e-orden tasas-ingreso * factor-demanda / 100) / 60
+      if ticks mod 10 = 0 [
+        let pendientes floor (e-acumulador + 0.000000001)
+        set e-acumulador max (list 0 (e-acumulador - pendientes))
+        ; Sorteo separado del transporte: con igual semilla y demanda,
+        ; los ingresos y destinos no cambian al modificar trenes o intervalo.
+        with-local-randomness [
+          random-seed ((cfg-semilla + ticks * 31 + e-orden * 104729) mod 2147483647)
+          while [pendientes &gt; 0] [
+            let cantidad-nueva min (list 5 pendientes)
+            let origen-nuevo e-orden
+            let destino-nuevo one-of (remove origen-nuevo (range cfg-estaciones))
+            set secuencia-grupo secuencia-grupo + 1
+            let prioridad-nueva secuencia-grupo
+            hatch-pasajeros 1 [
+              set p-personas cantidad-nueva
+              set p-origen origen-nuevo
+              set p-destino destino-nuevo
+              set p-sentido ifelse-value (destino-nuevo &gt; origen-nuevo) [1] [-1]
+              set p-instante ticks
+              set p-prioridad prioridad-nueva
+              set p-estado "ESPERANDO"
+              set p-tren nobody
+              set shape "circle"
+              set size 0.55
+              set label ""
+              hide-turtle
+            ]
+            set ingresados ingresados + cantidad-nueva
+            set pendientes pendientes - cantidad-nueva
+          ]
+        ]
+      ]
+    ]
+  ]
+end
+
+; ---------- MOVIMIENTO, PARADAS Y RETORNO ----------
+to avanzar-tren
+  ifelse t-estado = "VIAJANDO" [
+    set t-restante t-restante - 1
+    ubicar-en-recorrido
+    if t-restante = 0 [
+      set t-actual t-objetivo
+      set t-llegadas t-llegadas + 1
+      descender-pasajeros
+      ifelse member? t-actual (list 0 (cfg-estaciones - 1)) [
+        ; Descenso total, maniobra y cambio a la vía de regreso.
+        set t-sentido (- t-sentido)
+        set t-objetivo t-actual + t-sentido
+        set t-estado "MANIOBRA"
+        set t-restante cfg-maniobra
+        ubicar-en-terminal
+      ] [
+        set t-estado "DETENIDO"
+        set t-restante cfg-parada
+        embarcar-pasajeros
+      ]
+    ]
+  ] [
+    ifelse t-estado = "DETENIDO" [
+      embarcar-pasajeros
+      set t-restante max (list 0 (t-restante - 1))
+      if t-restante = 0 [
+        set t-objetivo t-actual + t-sentido
+        if via-libre? [ iniciar-viaje ]
+      ]
+    ] [
+      if t-estado = "MANIOBRA" [
+        set t-restante t-restante - 1
+        if t-restante = 0 [
+          set t-estado "LISTO"
+          set t-listo-desde ticks
+        ]
+      ]
+    ]
+  ]
+end
+
+to despachar-terminal
+  if ticks &gt;= e-proxima-salida [
+    let terminal-local e-orden
+    let disponibles trenes with [t-actual = terminal-local and t-estado = "LISTO"]
+    if any? disponibles [
+      let ordenados sort-by [[uno dos] -&gt;
+        ifelse-value ([t-listo-desde] of uno = [t-listo-desde] of dos)
+          [[t-id] of uno &lt; [t-id] of dos]
+          [[t-listo-desde] of uno &lt; [t-listo-desde] of dos]
+      ] disponibles
+      let elegido first ordenados
+      if [via-libre?] of elegido [
+        ask elegido [
+          embarcar-pasajeros
+          iniciar-viaje
+        ]
+        if e-ultima-salida &gt;= 0 [
+          set e-suma-intervalos e-suma-intervalos + ticks - e-ultima-salida
+          set e-cantidad-intervalos e-cantidad-intervalos + 1
+        ]
+        set e-ultima-salida ticks
+        set e-salidas e-salidas + 1
+        ; Tras una demora no se despachan trenes de golpe para recuperar horarios.
+        set e-proxima-salida ticks + cfg-intervalo
+      ]
+    ]
+  ]
+end
+
+to iniciar-viaje
+  ; La salida siempre parte de la estación lógica actual, nunca del depósito.
+  set t-estado "VIAJANDO"
+  set t-restante cfg-tramo
+  ubicar-en-recorrido
+  show-turtle
+end
+
+; Bloqueo conservador: un tren por tramo y reserva del andén siguiente.
+; No se aplica a los depósitos terminales, cuya maniobra es abstracta.
+to-report via-libre?
+  let direccion-local t-sentido
+  let origen-local t-actual
+  let destino-local t-objetivo
+  report not any? other trenes with [
+    t-sentido = direccion-local and
+    ((t-estado = "VIAJANDO" and t-actual = origen-local) or
+     (t-estado = "DETENIDO" and t-actual = destino-local))
+  ]
+end
+
+to ubicar-en-terminal
+  let punto-terminal one-of estaciones with [e-orden = [t-actual] of myself]
+  move-to punto-terminal
+  hide-turtle
+end
+
+to ubicar-en-recorrido
+  let segmento-local min (list t-actual t-objetivo)
+  let posicion-local posicion-ruta segmento-local t-sentido (1 - t-restante / cfg-tramo)
+  setxy (item 0 posicion-local) (item 1 posicion-local)
+  set heading item 2 posicion-local
+end
+
+to-report posicion-ruta [segmento-local direccion-local fraccion-local]
+  let ruta-local item segmento-local (ifelse-value (direccion-local = 1) [rutas-ida] [rutas-vuelta])
+  let distancia-local (max (list 0 (min (list 1 fraccion-local)))) * item 2 last ruta-local
+  let nodo-local 0
+  while [nodo-local &lt; length ruta-local - 2 and item 2 (item (nodo-local + 1) ruta-local) &lt; distancia-local] [
+    set nodo-local nodo-local + 1
+  ]
+  let inicio-local item nodo-local ruta-local
+  let fin-local item (nodo-local + 1) ruta-local
+  let proporcion-local (distancia-local - item 2 inicio-local) / (item 2 fin-local - item 2 inicio-local)
+  let dx-local item 0 fin-local - item 0 inicio-local
+  let dy-local item 1 fin-local - item 1 inicio-local
+  report (list
+    (item 0 inicio-local + proporcion-local * dx-local)
+    (item 1 inicio-local + proporcion-local * dy-local)
+    (atan dx-local dy-local))
+end
+
+; ---------- DESCENSO, FIFO Y CAPACIDAD ----------
+to descender-pasajeros
+  let tren-local self
+  let estacion-local t-actual
+  ask pasajeros with [p-tren = tren-local and p-destino = estacion-local] [
+    set finalizados finalizados + p-personas
+    die
+  ]
+end
+
+to embarcar-pasajeros
+  let tren-local self
+  let estacion-local t-actual
+  let direccion-local t-sentido
+  let libres t-capacidad - sum [p-personas] of pasajeros with [p-tren = tren-local]
+  let cola sort-by [[uno dos] -&gt;
+    ifelse-value ([p-instante] of uno = [p-instante] of dos)
+      [[p-prioridad] of uno &lt; [p-prioridad] of dos]
+      [[p-instante] of uno &lt; [p-instante] of dos]
+  ] pasajeros with [p-estado = "ESPERANDO" and p-origen = estacion-local and p-sentido = direccion-local]
+  foreach cola [ grupo-actual -&gt;
+    if libres &gt; 0 [
+      let cantidad-sube min (list libres [p-personas] of grupo-actual)
+      set espera-acumulada espera-acumulada + cantidad-sube * (ticks - [p-instante] of grupo-actual)
+      set embarcados embarcados + cantidad-sube
+      ask grupo-actual [
+        ifelse cantidad-sube = p-personas [
+          set p-estado "VIAJANDO"
+          set p-tren tren-local
+          hide-turtle
+        ] [
+          set p-personas p-personas - cantidad-sube
+          hatch-pasajeros 1 [
+            set p-personas cantidad-sube
+            set p-estado "VIAJANDO"
+            set p-tren tren-local
+            hide-turtle
+          ]
+        ]
+      ]
+      set libres libres - cantidad-sube
+    ]
+  ]
+end
+
+; ---------- REPRESENTACIÓN ----------
+to actualizar-vista
+  with-local-randomness [
+    ask trenes [
+      set color ifelse-value (t-estado = "VIAJANDO") [orange] [blue]
+      set label ""
+    ]
+    ; Cada etiqueta sigue a su formación, hacia fuera de su vía.
+    ask rotulos-trenes [
+      ifelse [hidden?] of rt-tren [hide-turtle] [
+        show-turtle
+        let ocupacion-local sum [p-personas] of pasajeros with [p-tren = [rt-tren] of myself]
+        set label (word "T" [t-id] of rt-tren ": " ocupacion-local)
+        let rumbo-local [heading] of rt-tren
+        setxy ([xcor] of rt-tren - 2.0 * cos rumbo-local + length label * 0.37)
+              ([ycor] of rt-tren + 2.0 * sin rumbo-local + 0.6)
+      ]
+    ]
+    ask estaciones [
+      set color ifelse-value (e-orden = estacion-foco - 1) [yellow] [green - 1]
+      set size ifelse-value (e-orden = estacion-foco - 1) [1.65] [1.0]
+    ]
+    ask pasajeros [hide-turtle]
+    ; Todas las estaciones muestran sus dos colas, con un límite solo visual.
+    foreach sort-on [e-orden] estaciones [ punto-estacion -&gt;
+      let orden-local [e-orden] of punto-estacion
+      let centro-local item orden-local posiciones-linea
+      let normal-local item orden-local normales-linea
+      let nx-local item 0 normal-local
+      let ny-local item 1 normal-local
+      foreach [-1 1] [ direccion-cola -&gt;
+        let cola sort-on [p-prioridad] pasajeros with [
+          p-estado = "ESPERANDO" and p-origen = orden-local and p-sentido = direccion-cola
+        ]
+        let indice-grupo 0
+        foreach cola [ grupo-actual -&gt;
+          ask grupo-actual [
+            if indice-grupo &lt; 4 [
+              show-turtle
+              let tangente-local ((indice-grupo mod 2) - 0.5) * 0.85
+              let distancia-cola 3.7 + floor (indice-grupo / 2) * 0.75
+              setxy (item 0 centro-local + direccion-cola * nx-local * distancia-cola + ny-local * tangente-local)
+                    (item 1 centro-local + direccion-cola * ny-local * distancia-cola - nx-local * tangente-local)
+              set color ifelse-value (direccion-cola = 1) [violet] [red]
+              set size 0.48
+            ]
+          ]
+          set indice-grupo indice-grupo + 1
+        ]
+      ]
+    ]
+    ask rotulos with [r-tipo = "COLA"] [
+      let centro-local item r-estacion posiciones-linea
+      let normal-local item r-estacion normales-linea
+      let orden-local r-estacion
+      let direccion-local r-sentido
+      let total-local sum [p-personas] of pasajeros with [
+        p-estado = "ESPERANDO" and p-origen = orden-local and p-sentido = direccion-local
+      ]
+      set label (word total-local)
+      setxy (item 0 centro-local + r-sentido * item 0 normal-local * 7.3 + length label * 0.37)
+            (item 1 centro-local + r-sentido * item 1 normal-local * 7.3 + 0.6)
+    ]
+  ]
+end
+
+; Solo dibuja la geometría. No introduce trenes ni demanda.
+to dibujar-linea
+  create-turtles 1 [
+    hide-turtle
+    set pen-size 2.0
+    set color [45 122 99]
+    foreach (sentence rutas-ida rutas-vuelta) [ camino-local -&gt;
+      pen-up
+      setxy (item 0 first camino-local) (item 1 first camino-local)
+      pen-down
+      foreach but-first camino-local [ nodo-local -&gt;
+        setxy (item 0 nodo-local) (item 1 nodo-local)
+      ]
+    ]
+    pen-up
+    set color [183 196 188]
+    set pen-size 0.7
+    foreach (range cfg-estaciones) [ indice-local -&gt;
+      let centro-local item indice-local posiciones-linea
+      let etiqueta-local item indice-local etiquetas-linea
+      ; La guía termina junto al nombre, sin pasar por el texto.
+      let extremo-x item 0 etiqueta-local
+      let ancho-aproximado length (item indice-local nombres-linea) * 1.03 + 4
+      if extremo-x &gt; item 0 centro-local [set extremo-x extremo-x - ancho-aproximado]
+      pen-up
+      setxy (item 0 centro-local) (item 1 centro-local)
+      pen-down
+      setxy extremo-x (item 1 etiqueta-local)
+    ]
+    die
+  ]
+  foreach (range cfg-estaciones) [ indice-local -&gt;
+    create-rotulos 1 [
+      setxy (item 0 (item indice-local etiquetas-linea)) (item 1 (item indice-local etiquetas-linea))
+      set r-tipo "NOMBRE"
+      set size 0
+      set label (word ifelse-value (indice-local &lt; 9) ["0"] [""] (indice-local + 1) "  " item indice-local nombres-linea)
+      set label-color [35 48 44]
+    ]
+  ]
+end
+
+to-report nombre-seleccionado
+  if not any? estaciones [ report "Pulsar Preparar" ]
+  report [e-nombre] of one-of estaciones with [e-orden = estacion-foco - 1]
+end
+
+to-report cola-seleccionada [direccion-local]
+  report sum [p-personas] of pasajeros with [p-estado = "ESPERANDO" and p-origen = estacion-foco - 1 and p-sentido = direccion-local]
+end
+
+to-report ocupacion-media
+  if not any? trenes [report 0]
+  let en-servicio trenes with [member? t-estado ["VIAJANDO" "DETENIDO"]]
+  if not any? en-servicio [report 0]
+  report 100 * a-bordo / (cfg-capacidad * count en-servicio)
+end
+
+; ---------- MÉTRICAS ----------
+to-report esperando
+  report sum [p-personas] of pasajeros with [p-estado = "ESPERANDO"]
+end
+
+to-report a-bordo
+  report sum [p-personas] of pasajeros with [p-estado = "VIAJANDO"]
+end
+
+to-report espera-media
+  if embarcados = 0 [ report 0 ]
+  report espera-acumulada / embarcados
+end
+
+to-report espera-en-cola
+  if esperando = 0 [ report 0 ]
+  report sum [p-personas * (ticks - p-instante)] of pasajeros with [p-estado = "ESPERANDO"] / esperando
+end
+
+to-report balance
+  report ingresados - esperando - a-bordo - finalizados
+end
+
+to-report intervalo-real [orden-terminal]
+  let punto-terminal one-of estaciones with [e-orden = orden-terminal]
+  if punto-terminal = nobody [ report 0 ]
+  if [e-cantidad-intervalos] of punto-terminal = 0 [ report 0 ]
+  report [e-suma-intervalos / e-cantidad-intervalos] of punto-terminal
+end
+
+to-report demora-terminal [orden-terminal]
+  let punto-terminal one-of estaciones with [e-orden = orden-terminal]
+  if punto-terminal = nobody [ report 0 ]
+  report max (list 0 (ticks - [e-proxima-salida] of punto-terminal))
+end
+
+to-report ciclo-ideal
+  if cfg-estaciones = 0 [ report 0 ]
+  report 2 * ((cfg-estaciones - 1) * cfg-tramo + (cfg-estaciones - 2) * cfg-parada + cfg-maniobra)
+end
+
+to-report flota-orientativa
+  if cfg-intervalo = 0 [ report 0 ]
+  ; Redondeo a flota par por el reparto inicial entre terminales.
+  report 2 * ceiling (ciclo-ideal / (2 * cfg-intervalo))
+end
+
+; ---------- VERIFICACIÓN AUTOMÁTICA ----------
+to comprobar-modelo
+  if balance != 0 [ error "No se conserva la cantidad de personas." ]
+  if any? pasajeros with [p-personas &lt;= 0 or p-personas != floor p-personas] [
+    error "Un grupo tiene una cantidad inválida."
+  ]
+  if any? pasajeros with [p-origen = p-destino or p-instante &gt; ticks] [
+    error "Origen, destino o llegada inválidos."
+  ]
+  if any? pasajeros with [p-estado = "ESPERANDO" and p-tren != nobody] [
+    error "Un grupo en espera tiene tren asignado."
+  ]
+  if any? pasajeros with [p-estado = "VIAJANDO" and p-tren = nobody] [
+    error "Un grupo a bordo no tiene tren."
+  ]
+  if count trenes != cfg-trenes [ error "Se modificó la flota durante la ejecución." ]
+  ask trenes [
+    let tren-local self
+    let estacion-local t-actual
+    let destino-local t-objetivo
+    let direccion-local t-sentido
+    if sum [p-personas] of pasajeros with [p-tren = tren-local] &gt; t-capacidad [
+      error "Un tren superó su capacidad."
+    ]
+    if member? t-estado ["LISTO" "MANIOBRA"] [
+      if any? pasajeros with [p-tren = tren-local] [ error "Hay pasajeros en maniobra o depósito." ]
+    ]
+    if member? t-estado ["LISTO" "MANIOBRA"] [
+      if not member? t-actual (list 0 (cfg-estaciones - 1)) [
+        error "Una formación en depósito no está en una terminal."
+      ]
+      let x-terminal [xcor] of one-of estaciones with [e-orden = estacion-local]
+      if abs (xcor - x-terminal) &gt; 0.000001 or not hidden? [
+        error "Posición o visibilidad incorrecta en depósito terminal."
+      ]
+    ]
+    if t-estado = "VIAJANDO" [
+      let posicion-esperada posicion-ruta (min (list estacion-local destino-local)) direccion-local (1 - t-restante / cfg-tramo)
+      if distancexy (item 0 posicion-esperada) (item 1 posicion-esperada) &gt; 0.00001 [
+        error "La formación no sigue la geometría de su tramo."
+      ]
+      if hidden? [error "Un tren en servicio quedó oculto."]
+      if t-restante &lt;= 0 [ error "Tiempo de viaje inválido." ]
+      if any? other trenes with [t-estado = "VIAJANDO" and t-actual = estacion-local and t-sentido = direccion-local] [
+        error "Dos trenes ocupan el mismo tramo y sentido."
+      ]
+      if any? other trenes with [t-estado = "DETENIDO" and t-actual = destino-local and t-sentido = direccion-local] [
+        error "Un tren viaja hacia un andén ocupado."
+      ]
+    ]
+    if t-estado = "DETENIDO" [
+      if any? other trenes with [t-estado = "DETENIDO" and t-actual = estacion-local and t-sentido = direccion-local] [
+        error "Dos trenes ocupan el mismo andén."
+      ]
+    ]
+    if any? pasajeros with [p-tren = tren-local and p-sentido != direccion-local] [
+      error "Pasajeros a bordo en sentido incorrecto."
+    ]
+  ]
+end
+
+; Fuente geométrica: SBASE / Buenos Aires Data, red_subte.geojson.
+; CC-BY-2.5-AR. Geometría adaptada: proyección local, escala y vías desplazadas.
+to cargar-linea-d
+  set normales-linea [[-0.575373 -0.817891] [-0.543698 -0.839281] [-0.826364 -0.563136] [0.035262 -0.999378] [-0.000239 -1.000000] [-0.310382 -0.950612] [-0.770825 -0.637047] [-0.641517 -0.767109] [-0.635457 -0.772136] [-0.695134 -0.718881] [-0.510177 -0.860069] [-0.510664 -0.859781] [-0.515851 -0.856678] [-0.539571 -0.841940] [-0.817361 -0.576125] [-0.793700 -0.608309]]
+  set nombres-linea ["Catedral" "9 de Julio" "Tribunales – Teatro Colón" "Callao" "Facultad de Medicina" "Pueyrredón" "Agüero" "Bulnes" "Scalabrini Ortiz" "Plaza Italia" "Palermo" "Ministro Carranza" "Olleros" "José Hernández" "Juramento" "Congreso de Tucumán"]
+  set posiciones-linea [[54.711723 -39.200000] [46.521250 -33.853452] [40.868307 -29.858284] [30.989545 -26.930959] [25.051310 -27.107646] [19.517674 -19.094302] [13.619751 -14.888956] [8.505651 -9.792495] [2.736996 -5.161342] [-3.748272 0.467216] [-9.336142 4.960098] [-20.847511 9.835452] [-32.795144 17.600292] [-42.023780 23.307470] [-47.423686 29.178636] [-54.711723 39.200000]]
+  set etiquetas-linea [[72.610027 -30.203201] [40.540570 -43.085542] [31.778300 -36.052778] [31.694791 -46.918521] [47.415544 -16.107646] [16.103469 -29.551032] [32.491681 -7.881436] [1.448963 -18.230692] [27.088627 3.332158] [-11.394742 -7.440471] [7.483397 14.420859] [-26.464813 0.377866] [-16.881942 27.023752] [-47.959064 14.046131] [-25.276462 35.516015] [-22.677449 45.891399]]
+  set rutas-ida [[[53.791126 -40.508625 0] [52.149968 -39.352964 2.007225] [47.046056 -36.099786 8.059752] [45.651333 -35.196301 9.721540]] [[45.651333 -35.196301 0] [45.155983 -34.874557 0.590670] [44.258482 -34.352400 1.629012] [43.110201 -33.673444 2.963003] [42.429154 -33.287514 3.745797] [41.784868 -32.899540 4.497880] [41.005613 -32.369672 5.440216] [40.303014 -31.673336 6.429424] [39.546124 -30.759301 7.616159]] [[39.546124 -30.759301 0] [38.922462 -29.672268 1.253234] [38.535415 -29.143254 1.908720] [38.137206 -28.643589 2.547653] [37.704144 -28.300748 3.099995] [37.593028 -28.203068 3.247942] [37.246318 -28.124005 3.603552] [36.797402 -28.132769 4.052554] [35.657128 -28.249165 5.198753] [33.101118 -28.461985 7.763608] [31.192493 -28.524787 9.673266] [31.045965 -28.529964 9.819885]] [[31.045965 -28.529964 0] [29.467101 -28.585603 1.579844] [27.723911 -28.616378 3.323306] [26.064222 -28.675935 4.984063] [25.604136 -28.706519 5.445164] [25.050928 -28.707646 5.998373]] [[25.050928 -28.707646 0] [24.143513 -28.704288 0.907422] [23.144385 -28.571763 1.915301] [22.108665 -28.152587 3.032630] [21.270287 -27.464483 4.117233] [20.577859 -26.642936 5.191661] [20.119929 -25.579838 6.349192] [19.978158 -24.514875 7.423550] [20.013889 -23.615233 8.323902] [20.047129 -22.979902 8.960102] [20.017750 -22.534616 9.406356] [19.963190 -22.057231 9.886848] [19.863344 -21.639876 10.315980] [19.767210 -21.276377 10.691977] [19.681829 -21.039387 10.943878] [19.548644 -20.808383 11.210526] [19.456974 -20.675921 11.371615] [19.632658 -20.808345 11.591617] [19.580264 -20.812464 11.644173] [19.305706 -20.715534 11.935338] [19.021062 -20.615281 12.237121]] [[19.021062 -20.615281 0] [17.254105 -20.030841 1.861104] [15.238060 -18.766800 4.240650] [13.771455 -17.405626 6.241580] [12.488735 -16.028011 8.123917] [12.386431 -15.908231 8.281440]] [[12.386431 -15.908231 0] [11.477813 -14.805460 1.428878] [10.180521 -13.505491 3.265420] [8.878902 -12.138260 5.153152] [7.663262 -11.173345 6.705196] [7.479224 -11.019869 6.944831]] [[7.479224 -11.019869 0] [6.059454 -9.832319 1.850951] [4.102219 -8.278587 4.349921] [2.882697 -7.353005 5.880913] [1.720265 -6.396760 7.386122]] [[1.720265 -6.396760 0] [1.359094 -6.099238 0.467935] [-1.031318 -4.055410 3.612980] [-3.510081 -1.986345 6.841802] [-4.860485 -0.682993 8.718586]] [[-4.860485 -0.682993 0] [-5.075987 -0.469389 0.303427] [-7.951751 1.916894 4.040319] [-9.899578 3.445207 6.516157] [-10.152426 3.583987 6.804587]] [[-10.152426 3.583987 0] [-10.416951 3.743498 0.308897] [-10.964716 4.015252 0.920368] [-11.983420 4.375263 2.000815] [-13.550130 4.927290 3.661933] [-15.412311 5.567141 5.630975] [-17.313053 6.244476 7.648796] [-19.090619 7.020240 9.588269] [-20.657799 7.884450 11.377937] [-21.664573 8.459804 12.537517]] [[-21.664573 8.459804 0] [-24.263271 10.026652 3.034509] [-25.990393 11.255971 5.154455] [-31.014661 14.619922 11.200896] [-33.620506 16.229607 14.263821]] [[-33.620506 16.229607 0] [-39.028678 19.444509 6.291576] [-42.283985 21.573915 10.181484] [-42.887094 21.960366 10.897784]] [[-42.887094 21.960366 0] [-43.100602 22.097651 0.253836] [-44.449482 22.913664 1.830338] [-45.031783 23.295300 2.526556] [-45.574872 23.811183 3.275609] [-46.017858 24.394434 4.008015] [-47.240556 26.165653 6.160272] [-48.731464 28.256835 8.728509]] [[-48.731464 28.256835 0] [-50.934889 31.406883 3.844201] [-52.962112 34.287300 7.366478] [-55.981644 38.226706 12.329994]]]
+  set rutas-vuelta [[[47.391167 -32.510603 0] [48.770321 -33.404065 1.643272] [53.901058 -36.674591 7.727744] [55.632321 -37.891375 9.843833]] [[42.190490 -28.957267 0] [42.676341 -29.526869 0.748664] [43.038810 -29.898618 1.267876] [43.501842 -30.199169 1.819899] [44.040628 -30.522890 2.448458] [44.720096 -30.907899 3.229423] [45.878825 -31.592964 4.575517] [46.815112 -32.138265 5.659024] [47.391167 -32.510603 6.344935]] [[30.933126 -25.331954 0] [31.087738 -25.326503 0.154708] [32.903886 -25.268069 1.971796] [35.373210 -25.061785 4.449722] [36.597761 -24.939003 5.680413] [37.626969 -24.946725 6.709649] [38.758630 -25.222905 7.874524] [39.593934 -25.718366 8.845716] [40.403221 -26.384126 9.893658] [41.070207 -27.190096 10.939821] [41.630112 -27.966796 11.897295] [42.190490 -28.957267 13.035300]] [[25.051692 -25.507646 0] [25.501690 -25.508159 0.449998] [25.928440 -25.478817 0.877756] [27.638806 -25.417509 2.589220] [29.383956 -25.386683 4.334642] [30.933126 -25.331954 5.884778]] [[20.014286 -17.573323 0] [20.368970 -17.697344 0.375742] [20.697074 -17.813675 0.723859] [21.282803 -18.066627 1.361874] [21.884033 -18.590403 2.159256] [22.253494 -19.098474 2.787458] [22.581544 -19.686001 3.460366] [22.815647 -20.303221 4.120491] [22.968153 -20.865173 4.702769] [23.117030 -21.515668 5.370083] [23.204942 -22.248594 6.108263] [23.247128 -22.978059 6.838947] [23.210300 -23.766762 7.628509] [23.176021 -24.397950 8.260627] [23.212296 -24.756876 8.621382] [23.286765 -24.939461 8.818569] [23.516536 -25.185368 9.155118] [23.777512 -25.422211 9.507543] [23.911767 -25.465137 9.648493] [24.330574 -25.509761 10.069671] [25.051692 -25.507646 10.790792]] [[14.853071 -13.869680 0] [14.836323 -13.853423 0.023340] [16.038013 -15.146707 1.788741] [17.173979 -16.218817 3.350740] [18.647251 -17.150018 5.093629] [20.014286 -17.573323 6.524702]] [[9.532079 -8.565122 0] [9.665898 -8.677459 0.174720] [11.052405 -9.789668 1.952194] [12.471596 -11.271442 4.003964] [13.835965 -12.642333 5.938090] [14.853071 -13.869680 7.532105]] [[3.753726 -3.925924 0] [4.866183 -4.841872 1.441014] [6.071200 -5.756065 2.953567] [8.076159 -7.347787 5.513535] [9.532079 -8.565122 7.411325]] [[-2.636058 1.617425 0] [-1.395768 0.415671 1.727000] [1.033472 -1.610693 4.890442] [3.432996 -3.662245 8.047431] [3.753726 -3.925924 8.462635]] [[-8.519859 6.336208 0] [-7.975229 6.001940 0.639028] [-5.935588 4.401866 3.231396] [-3.014169 1.977835 7.027527] [-2.636058 1.617425 7.549891]] [[-20.030449 11.211101 0] [-19.094088 10.676368 1.078292] [-17.679542 9.892323 2.695594] [-16.140415 9.221878 4.374405] [-14.355982 8.587765 6.268158] [-12.499461 7.949888 8.231206] [-10.916963 7.392326 9.909055] [-9.758004 6.979008 11.139509] [-8.932098 6.578143 12.057557] [-8.519859 6.336208 12.535547]] [[-31.969782 18.970977 0] [-29.267432 17.300816 3.176812] [-24.190337 13.901684 9.286721] [-22.525760 12.713855 11.331655] [-20.030449 11.211101 14.244531]] [[-41.160466 24.654574 0] [-40.535906 24.254254 0.741843] [-37.348729 22.168068 4.551077] [-31.969782 18.970977 10.808430]] [[-46.115908 30.100437 0] [-44.622180 28.005247 2.573139] [-43.400029 26.234806 4.724444] [-43.161105 25.912071 5.125994] [-43.074249 25.826715 5.247771] [-42.773944 25.639938 5.601422] [-41.433305 24.828973 7.168258] [-41.160466 24.654574 7.492074]] [[-53.441803 40.173294 0] [-50.389770 36.190734 5.017538] [-48.315376 33.244859 8.620494] [-46.115908 30.100437 12.457818]]]
+end
+
+to comprobar-geometria
+  if cfg-estaciones != 16 or length rutas-ida != 15 or length rutas-vuelta != 15 [
+    error "La geometría no contiene las dieciséis estaciones de la línea D."
+  ]
+  foreach (range 14) [ indice-local -&gt;
+    let final-ida last (item indice-local rutas-ida)
+    let inicio-ida first (item (indice-local + 1) rutas-ida)
+    let final-vuelta last (item (indice-local + 1) rutas-vuelta)
+    let inicio-vuelta first (item indice-local rutas-vuelta)
+    if abs (item 0 final-ida - item 0 inicio-ida) &gt; 0.00001 or
+       abs (item 1 final-ida - item 1 inicio-ida) &gt; 0.00001 or
+       abs (item 0 final-vuelta - item 0 inicio-vuelta) &gt; 0.00001 or
+       abs (item 1 final-vuelta - item 1 inicio-vuelta) &gt; 0.00001 [
+      error "Hay una discontinuidad entre dos tramos."
+    ]
+  ]
+end
+
+; DATOS PROCESADOS — SBASE 2025, días 19, 20, 21, 22 y 23 de mayo.
+; Cada fila: una estación en orden Catedral → Congreso; 20 valores: 5 días × 4 intervalos.
+; El contenido es pax_TOTAL agregado por estación, excluye transbordos sin molinete.
+to cargar-demanda-real
+  set datos-ingreso [[97 91 108 116 70 115 108 116 91 116 107 104 85 102 110 120 79 95 92 71] [51 82 76 69 55 85 89 64 68 80 73 34 74 67 101 47 53 63 66 38] [64 69 51 73 58 46 66 107 63 60 55 51 54 80 58 63 38 63 58 47] [73 88 95 76 79 103 106 107 77 108 122 111 56 87 84 79 65 100 92 95] [87 118 123 131 85 112 143 168 89 103 133 201 85 120 134 173 76 89 101 100] [90 94 111 104 85 102 108 105 83 109 126 114 95 87 129 119 73 96 106 104] [151 156 178 155 164 177 183 188 171 151 201 173 160 143 204 179 123 122 131 130] [149 202 241 206 190 211 229 220 159 219 225 217 203 200 236 212 139 171 191 145] [187 196 205 172 174 187 224 191 159 198 214 180 197 156 234 210 140 137 156 142] [103 138 161 131 140 137 135 153 141 153 165 136 140 137 146 142 102 118 138 120] [103 276 126 308 288 217 238 129 179 214 232 263 114 310 229 219 176 210 207 164] [156 235 295 205 234 287 262 229 235 244 284 232 202 243 306 252 142 213 150 199] [222 252 248 208 218 245 272 215 256 259 259 183 225 250 272 204 173 195 223 165] [229 266 243 204 265 280 278 227 282 295 303 220 258 282 269 211 191 185 205 198] [263 297 282 235 297 327 313 251 293 312 281 279 254 289 275 248 214 261 239 178] [764 996 814 686 848 961 917 708 781 1093 858 738 779 914 850 755 662 688 653 500]]
+  set tasas-ingreso map [ fila-datos -&gt; sum fila-datos / 300 ] datos-ingreso
+  if length datos-ingreso != 16 or length tasas-ingreso != 16 [error "Faltan datos de estaciones."]
+  if any? estaciones [ error "Los datos deben cargarse antes de crear estaciones." ]
+  foreach datos-ingreso [ fila-datos -&gt;
+    if length fila-datos != 20 [error "Faltan intervalos o días de una estación."]
+    if not empty? filter [valor-local -&gt; valor-local &lt; 0 or valor-local != floor valor-local] fila-datos [
+      error "Los ingresos procesados deben ser enteros no negativos."
+    ]
+  ]
+end
+
+to-report tasa-en-foco
+  if not is-list? tasas-ingreso [report 0]
+  report item (estacion-foco - 1) tasas-ingreso * factor-demanda / 100
+end
+
+to-report tasa-total
+  if not is-list? tasas-ingreso [report 0]
+  report sum tasas-ingreso * factor-demanda / 100
+end
+</code>
+  <widgets>
+    <view x="250" y="65" width="1131" height="739" minPxcor="-80" maxPxcor="80" minPycor="-52" maxPycor="52" patchSize="7" fontSize="12" frameRate="30" wrappingAllowedX="false" wrappingAllowedY="false" showTickCounter="true" tickCounterLabel="Segundos simulados" updateMode="1" />
+    <note x="10" y="10" width="1350" height="40" fontSize="22" markdown="false" textColorLight="-16777216" textColorDark="-1" backgroundLight="0" backgroundDark="0">LÍNEA D | Demanda por estación · mayo de 2025</note>
+    <button x="10" y="65" width="110" height="38" display="Preparar" kind="Observer" forever="false" disableUntilTicks="false">setup</button>
+    <button x="125" y="65" width="110" height="38" display="Un segundo" kind="Observer" forever="false" disableUntilTicks="true">go</button>
+    <button x="10" y="110" width="110" height="38" display="Simular / pausar" kind="Observer" forever="true" disableUntilTicks="true">go</button>
+    <button x="125" y="110" width="110" height="38" display="Avanzar 60 s" kind="Observer" forever="false" disableUntilTicks="true">repeat 60 [go]</button>
+    <slider x="10" y="170" width="225" height="50" display="n-trenes" variable="n-trenes" min="2" max="24" step="2" default="16" direction="Horizontal" units="formaciones" />
+    <slider x="10" y="226" width="225" height="50" display="intervalo-seg" variable="intervalo-seg" min="10" max="240" step="10" default="240" direction="Horizontal" units="s" />
+    <slider x="10" y="282" width="225" height="50" display="viaje-seg" variable="viaje-seg" min="5" max="120" step="5" default="85" direction="Horizontal" units="s" />
+    <slider x="10" y="338" width="225" height="50" display="parada-seg" variable="parada-seg" min="1" max="60" step="1" default="20" direction="Horizontal" units="s" />
+    <slider x="10" y="394" width="225" height="50" display="maniobra-seg" variable="maniobra-seg" min="1" max="120" step="1" default="120" direction="Horizontal" units="s" />
+    <slider x="10" y="450" width="225" height="50" display="capacidad-tren" variable="capacidad-tren" min="50" max="2000" step="50" default="1500" direction="Horizontal" units="personas" />
+    <slider x="10" y="506" width="225" height="50" display="factor-demanda" variable="factor-demanda" min="0" max="200" step="5" default="100" direction="Horizontal" units="%" />
+    <slider x="10" y="562" width="225" height="50" display="semilla" variable="semilla" min="1" max="100" step="1" default="1" direction="Horizontal" units="" />
+    <slider x="10" y="618" width="225" height="50" display="estacion-foco" variable="estacion-foco" min="1" max="16" step="1" default="1" direction="Horizontal" units="número" />
+    <note x="10" y="690" width="225" height="255" fontSize="12" markdown="false" textColorLight="-16777216" textColorDark="-1" backgroundLight="0" backgroundDark="0">LECTURA DEL MAPA
+
+T3: 240 = personas en tren T3.
+Violeta: cola hacia Congreso.
+Rojo: cola hacia Catedral.
+Hasta 4 puntos por cola: cada
+punto representa 1 a 5 personas.
+Los números incluyen a todos.
+
+Datos: promedio 19 al 23/05/2025,
+08:00–09:00. Para iniciar: Preparar.
+El factor y el foco cambian en marcha.</note>
+    <note x="250" y="815" width="1125" height="80" fontSize="12" markdown="false" textColorLight="-16777216" textColorDark="-1" backgroundLight="0" backgroundDark="0">Ingreso por estación: promedio observado de 08:00 a 09:00, aplicado como tasa constante. El factor modifica todas las estaciones por igual.
+Puntos: hasta 4 grupos por cola; los números incluyen a todas las personas. Trenes listos o en maniobra: ocultos en terminal.
+Destinos, tiempos, intervalo y composición de flota son supuestos; ver Info y sus fuentes.</note>
+    <note x="1395" y="12" width="425" height="40" fontSize="18" markdown="false" textColorLight="-16777216" textColorDark="-1" backgroundLight="0" backgroundDark="0">INDICADORES</note>
+    <note x="1395" y="55" width="425" height="25" fontSize="14" markdown="false" textColorLight="-16777216" textColorDark="-1" backgroundLight="0" backgroundDark="0">Toda la línea</note>
+    <monitor x="1395" y="85" width="205" height="50" display="Ingresados" precision="0" fontSize="11">ingresados</monitor>
+    <monitor x="1610" y="85" width="205" height="50" display="Esperando · toda la línea" precision="0" fontSize="11">esperando</monitor>
+    <monitor x="1395" y="145" width="205" height="50" display="A bordo · todos los trenes" precision="0" fontSize="11">a-bordo</monitor>
+    <monitor x="1610" y="145" width="205" height="50" display="Finalizados" precision="0" fontSize="11">finalizados</monitor>
+    <monitor x="1395" y="205" width="205" height="50" display="Balance = 0" precision="0" fontSize="11">balance</monitor>
+    <monitor x="1610" y="205" width="205" height="50" display="Ocupación en servicio (%)" precision="1" fontSize="11">ocupacion-media</monitor>
+    <note x="1395" y="270" width="425" height="25" fontSize="14" markdown="false" textColorLight="-16777216" textColorDark="-1" backgroundLight="0" backgroundDark="0">Servicio y espera</note>
+    <monitor x="1395" y="300" width="205" height="50" display="Intervalo Catedral (s)" precision="1" fontSize="11">intervalo-real 0</monitor>
+    <monitor x="1610" y="300" width="205" height="50" display="Intervalo Congreso (s)" precision="1" fontSize="11">intervalo-real (cfg-estaciones - 1)</monitor>
+    <monitor x="1395" y="360" width="205" height="50" display="Demora Cat. / Cong. (s)" precision="0" fontSize="11">(word demora-terminal 0 " / " demora-terminal (cfg-estaciones - 1))</monitor>
+    <monitor x="1610" y="360" width="205" height="50" display="Viaje / Listos / Maniobra" precision="0" fontSize="11">(word count trenes with [t-estado = "VIAJANDO"] " / " count trenes with [t-estado = "LISTO"] " / " count trenes with [t-estado = "MANIOBRA"])</monitor>
+    <monitor x="1395" y="420" width="205" height="50" display="Espera al subir (s)" precision="1" fontSize="11">espera-media</monitor>
+    <monitor x="1610" y="420" width="205" height="50" display="Espera cola actual (s)" precision="1" fontSize="11">espera-en-cola</monitor>
+    <note x="1395" y="480" width="425" height="25" fontSize="14" markdown="false" textColorLight="-16777216" textColorDark="-1" backgroundLight="0" backgroundDark="0">Solo la estación en foco</note>
+    <monitor x="1395" y="510" width="420" height="50" display="Estación en foco" precision="0" fontSize="11">nombre-seleccionado</monitor>
+    <monitor x="1395" y="570" width="205" height="50" display="Foco → Congreso (personas)" precision="0" fontSize="11">cola-seleccionada 1</monitor>
+    <monitor x="1610" y="570" width="205" height="50" display="Foco → Catedral (personas)" precision="0" fontSize="11">cola-seleccionada -1</monitor>
+    <plot x="1395" y="700" width="420" height="165" display="Personas" xMin="0.0" xMax="300.0" yMin="0.0" yMax="20.0" autoPlotX="true" autoPlotY="true" legend="true" xAxis="Tiempo (s)" yAxis="Personas">
+      <setup />
+      <update />
+      <pen display="Esperando" interval="1.0" mode="0" color="-8630108" legend="true">
+        <setup />
+        <update>plot esperando</update>
+      </pen>
+      <pen display="A bordo" interval="1.0" mode="0" color="-13345367" legend="true">
+        <setup />
+        <update>plot a-bordo</update>
+      </pen>
+    </plot>
+    <plot x="1395" y="875" width="420" height="165" display="Espera" xMin="0.0" xMax="300.0" yMin="0.0" yMax="20.0" autoPlotX="true" autoPlotY="true" legend="true" xAxis="Tiempo (s)" yAxis="Segundos">
+      <setup />
+      <update />
+      <pen display="Al subir" interval="1.0" mode="0" color="-10899396" legend="true">
+        <setup />
+        <update>plot espera-media</update>
+      </pen>
+      <pen display="Cola actual" interval="1.0" mode="0" color="-2674135" legend="true">
+        <setup />
+        <update>plot espera-en-cola</update>
+      </pen>
+    </plot>
+    <monitor x="1395" y="630" width="205" height="50" display="Foco: ingreso (pers/min)" precision="1" fontSize="11">tasa-en-foco</monitor>
+    <monitor x="1610" y="630" width="205" height="50" display="Total ingreso (pers/min)" precision="1" fontSize="11">tasa-total</monitor>
+  </widgets>
+  <info>## VERSIÓN 6: INGRESOS POR ESTACIÓN CON DATOS DE 2025
+
+- El modelo representa las 16 estaciones de la línea D y conserva la circulación de ida y vuelta, la flota fija, las colas, la capacidad y las métricas de la versión 5.
+- Se reemplaza la misma demanda ficticia en todas las estaciones por una tasa calculada a partir de molinetes reales.
+- Los datos procesados están incluidos en este archivo: para abrirlo no se necesitan CSV, extensiones adicionales ni conexión a Internet.
+
+## PERÍODO Y ELECCIÓN
+
+- **Año:** 2025. Se obtuvo el archivo anual de SBASE y se comprobó que contiene los doce meses. Para esta versión se procesó solo el archivo de mayo para las líneas D, E y H.
+- **Días:** lunes 19, martes 20, miércoles 21, jueves 22 y viernes 23 de mayo de 2025.
+- **Franja:** 08:00–09:00, con cuatro registros de 15 minutos por día.
+- El período elegido es posterior a la reapertura de Palermo de marzo de 2025 y anterior al cierre de Plaza Italia del 11 de agosto de 2025. La línea también había estado cerrada en enero–marzo de 2024 por el nuevo sistema de señales.
+- Se evitó el 15 de mayo, día de un partido con servicio especial. Que no se haya identificado otra incidencia no demuestra que esos cinco días estuvieran libres de toda interrupción.
+- Es una muestra de cinco días hábiles, NO el promedio de todo mayo o de todo 2025. No se compararon exhaustivamente todos los años y períodos posibles.
+- La franja 08:00–09:00 permite hacer una primera prueba: no se implementa aún un cambio automático de hora pico a valle.
+
+## CÓMO SE PROCESÓ LA DEMANDA
+
+- Se filtraron LINEA = LineaD, las cinco fechas seleccionadas y los cuatro intervalos de 08:00 a 09:00.
+- Se sumó **pax_TOTAL** por estación, día e intervalo. El total ya incluye las categorías de pago y franquicias; no se sumaron nuevamente.
+- Los nombres **Callao** y **Callao.D** se agruparon en Callao; sus identificadores de molinete revisados son distintos. **Pueyrredon.D** corresponde a Pueyrredón de la línea D.
+- La suma de las cuatro franjas y los cinco días se divide por **300 minutos** para obtener personas por minuto de cada estación.
+- A factor-demanda = 100 %, cada estación recibe su tasa promedio constante; no se reproducen las variaciones entre los cuatro cuartos de hora.
+- Las 20 cantidades por estación se incluyen en la lista datos-ingreso del código, en orden de fecha y de intervalo. Esto permite revisar el cálculo o incorporar perfiles temporales más adelante.
+- La tasa se acumula cada segundo y las personas enteras se crean cada diez segundos. Las fracciones se conservan; la generación agrupa las llegadas y aproxima su instante.
+
+## REVISIÓN DE LA MUESTRA
+
+- **2.151 registros** seleccionados de molinetes; **0 duplicados** en la clave fecha, nombre registrado, molinete e intervalo; **0 valores negativos** y **0 filas** con suma de categorías distinta de pax_TOTAL.
+- Las 16 estaciones tienen registros en los 20 intervalos considerados. La presencia de registros no prueba que ningún molinete haya faltado o que no haya interrupciones no documentadas.
+- Callao y Callao.D tienen identificadores de molinete distintos en la muestra inspeccionada y se normalizaron a una sola estación.
+- Total de las cinco horas observadas, sumando estaciones: **63.961 ingresos**. El promedio es **12.792,2 ingresos por hora**, o **213,2033 personas/minuto** en toda la línea.
+- Los datos cuentan pasos por molinetes. No incorporan explícitamente transbordos internos que no atraviesen un molinete de la línea D.
+
+## INGRESOS OBSERVADOS POR ESTACIÓN
+
+La tabla muestra la suma de las 20 franjas por estación y su promedio. Las tasas se conservan sin el redondeo de la tabla.
+
+| N.º | Estación | Total en 5 días | Promedio personas/h | Promedio personas/min |
+|---:|---|---:|---:|---:|
+| 1 | Catedral | 1993 | 398.6 | 6.64 |
+| 2 | 9 de Julio | 1335 | 267.0 | 4.45 |
+| 3 | Tribunales – Teatro Colón | 1224 | 244.8 | 4.08 |
+| 4 | Callao | 1803 | 360.6 | 6.01 |
+| 5 | Facultad de Medicina | 2371 | 474.2 | 7.90 |
+| 6 | Pueyrredón | 2040 | 408.0 | 6.80 |
+| 7 | Agüero | 3240 | 648.0 | 10.80 |
+| 8 | Bulnes | 3965 | 793.0 | 13.22 |
+| 9 | Scalabrini Ortiz | 3659 | 731.8 | 12.20 |
+| 10 | Plaza Italia | 2736 | 547.2 | 9.12 |
+| 11 | Palermo | 4202 | 840.4 | 14.01 |
+| 12 | Ministro Carranza | 4605 | 921.0 | 15.35 |
+| 13 | Olleros | 4544 | 908.8 | 15.15 |
+| 14 | José Hernández | 4891 | 978.2 | 16.30 |
+| 15 | Juramento | 5388 | 1077.6 | 17.96 |
+| 16 | Congreso de Tucumán | 15965 | 3193.0 | 53.22 |
+
+Cada día se contempla una sola hora. La suma de las columnas de cinco días es 63.961; no es una cantidad diaria.
+
+## QUÉ ES DATO Y QUÉ SIGUE SIENDO HIPÓTESIS
+
+- **Observado:** pasajeros registrados en molinetes de las 16 estaciones de la D, cinco días y cuatro intervalos cada día.
+- **Procesado:** promedio fijo por estación de esa franja, aplicado durante toda la ejecución. No representa un día completo.
+- **Sorteado:** destino entre las otras 15 estaciones con igual probabilidad. El sentido se obtiene del origen y destino. Es una hipótesis provisional, no una matriz origen-destino observada.
+- **No incorporado:** transferencias internas, población y pesos territoriales, variación por hora pico/valle y eventos masivos.
+- **Simulado:** la espera, la ocupación, el ascenso y el descenso. No son mediciones reales.
+- Se inicia con trenes y estaciones vacíos, aunque la franja seleccionada ocurre en una línea ya en funcionamiento. Los primeros minutos son una fase transitoria y afectan los promedios.
+
+## PARÁMETROS INICIALES Y SUS FUENTES
+
+- **n-trenes = 16:** escenario de prueba. En los despachos de la D de los cinco días, para registros con hora entre 08:00 y 09:00, aparecen entre 15 y 17 identificadores distintos de formación por día al unir las columnas A y D. Este recuento NO prueba que todos circularan simultáneamente ni equivale a flota total. Además, el significado operativo preciso de esas columnas requiere corroboración.
+- **intervalo-seg = 240:** hipótesis inicial aproximada para comparar escenarios. En cada día y cada columna “Hora sale A” y “Hora sale D” se ordenaron las horas en 08:00–09:00 y se calcularon diferencias consecutivas dentro de la misma columna y día. La mediana conjunta de 147 diferencias es 236 s. Se usa 240 s como valor redondeado de prueba; no se presenta como frecuencia oficial validada ni se asignan columnas a terminales sin más documentación. Los intervalos cortados por los límites de la hora no se incluyen.
+- **viaje-seg = 85 y parada-seg = 20:** aproximación homogénea. Producen 15 × 85 + 14 × 20 = 1.555 s, unos 25 min 55 s de una terminal a otra, si no hay bloqueos. El Boletín Oficial de 2019 citaba 26 min entre cabeceras; no demuestra que ese tiempo haya sido el observado en mayo de 2025.
+- **maniobra-seg = 120:** supuesto de prueba por terminal; no se encontró una medición verificada de esa ventana.
+- **capacidad-tren = 1.500:** valor máximo publicado por Alstom para una formación Metropolis de seis coches del pedido de la línea D. Se aplica por simplicidad a todos los trenes; no acredita que todas las series tuvieran idéntica capacidad ni es una capacidad cómoda.
+- **factor-demanda = 100 %:** usa las tasas observadas calculadas arriba. 50 % representa la mitad y 0 % detiene nuevos ingresos. Modificarlo afecta a todas las estaciones por igual y puede hacerse durante una ejecución; conserva las fracciones pendientes.
+- **semilla = 1:** controla el sorteo de destinos. Un mismo valor y la misma demanda permiten comparar frecuencias con iguales grupos y destinos generados.
+- Ninguno de los parámetros operativos de esta lista valida por sí solo los resultados de espera u ocupación.
+
+## VISUALIZACIÓN Y CONTROLES
+
+1. Abrir el archivo en NetLogo 7.0.4.
+2. Pulsar **Preparar** para cargar las tasas y crear la flota.
+3. Usar **Un segundo** o **Simular / pausar**. **Avanzar 60 s** da un minuto simulado.
+4. **estacion-foco** selecciona una estación y sus indicadores. No altera la demanda.
+5. **Foco: ingreso (pers/min)** muestra la tasa de esa estación con el factor aplicado; **Total ingreso (pers/min)** suma las 16 tasas.
+6. **Foco → Congreso / Catedral** muestran las colas de la estación en foco; **Esperando · toda la línea** suma ambas colas de todas las estaciones.
+7. El número violeta de cada andén indica la cola a Congreso, y el rojo la cola a Catedral. Cada punto representa de 1 a 5 personas; se dibujan hasta cuatro grupos por cola, pero el número incluye a todos.
+8. Una etiqueta como **T3: 240** muestra las personas a bordo de esa formación.
+9. El mapa tiene dos vías gráficamente separadas, con recorrido basado en geometría oficial. Sus distancias y separación son ilustrativas; viaje-seg controla la duración de cada tramo.
+10. **Balance** debe ser cero: ingresados = esperando + a bordo + finalizados.
+
+- Todos los controles salvo factor-demanda y estacion-foco se aplican al pulsar Preparar.
+- Un tick equivale a un segundo simulado. La velocidad de animación no cambia la duración simulada.
+- La espera al subir es acumulada solo para quienes embarcaron. La espera cola actual se refiere a quienes aún esperan; conviene leer ambas junto con el tamaño de cola.
+
+## COMPARAR INTERVALOS
+
+- En NetLogo en español: **Herramientas → Analizador de Comportamiento → Comparar intervalos → Ejecutar**.
+- Compara 180 y 240 segundos, con 16 trenes, factor 100 %, las tasas de esta muestra y semillas 1, 2 y 3.
+- Son seis ejecuciones de 3.600 segundos, con valores finales de ingresos, esperas, ocupación, colas y intervalos realmente conseguidos.
+- Las repeticiones comparten entradas y destino por semilla entre intervalos, pero los resultados son de un escenario hipotético y empiezan con la línea vacía.
+- El intervalo pedido puede no alcanzarse por la flota y el bloqueo conservador. Para interpretar el resultado se deben mirar los intervalos reales y la demora en las terminales.
+- Para guardar los valores de cada ejecución elegir **Resultados tabulados**. Los valores finales no constituyen una serie de cada segundo.
+
+## CODIFICACIÓN Y COMPROBACIONES
+
+- **cargar-demanda-real:** integra la tabla de 16 estaciones y 20 intervalos, comprueba dimensiones y calcula las tasas.
+- **generar-pasajeros:** acumula ingresos por estación y factor; mantiene fracciones y crea los grupos.
+- **avanzar-tren / despachar-terminal / via-libre?:** administran el viaje, los intervalos, maniobras y bloqueos.
+- **embarcar-pasajeros / descender-pasajeros:** aplican prioridad FIFO, destino y capacidad.
+- **actualizar-vista:** representa trenes, etiquetas y grupos; los puntos omitidos siguen existiendo.
+- **comprobar-modelo:** verifica conservación, capacidad, destinos, sentido, bloqueo y trayectoria en cada paso.
+- Las tasas constantes no reconstruyen cómo se distribuyeron los pasajeros en cada segundo dentro de los 15 minutos; es una aproximación.
+
+## FUENTES Y REFERENCIAS
+
+- SBASE, **Molinetes 2025**: https://data.buenosaires.gob.ar/dataset/subte-viajes-molinetes
+- Archivo ZIP: https://cdn.buenosaires.gob.ar/datosabiertos/datasets/sbase/subte-viajes-molinetes/molinetes-2025.zip
+- Archivo interno: molinetes-2025/202505_PAX15min-DEH-INCLUYEOTROMODOSDEPAGO.csv.
+- SHA-256 del ZIP descargado: c7579dfda668bb11ee3b97c3d2c4c69767e42e0b1565a736a366d2a3b6f40984
+- SBASE, **Formaciones despachadas 2025**: https://data.buenosaires.gob.ar/dataset/subte-trenes-despachados/resource/8f09119f-aa64-44f3-8ffe-a2d1d782cd50
+- Archivo CSV: https://cdn.buenosaires.gob.ar/datosabiertos/datasets/sbase/subte-trenes-despachados/formaciones-despachadas-2025.csv
+- reapertura Palermo: https://buenosaires.gob.ar/gcaba_historico/noticias/la-estacion-palermo-de-la-linea-d-reabrio-tras-su-renovacion-integral
+- cierre Plaza Italia: https://cdn2.buenosaires.gob.ar/campanias/gcba2025/
+- servicio especial 15 de mayo: https://buenosaires.gob.ar/gcaba_historico/noticias/linea-d-este-jueves-servicio-especial-para-volver-casa-despues-del-partido
+- referencia histórica de 26 minutos: https://documentosboletinoficial.buenosaires.gob.ar/publico/20190607.pdf
+- Alstom, capacidad máxima: https://www.alstom.com/press-releases-news/2016/5/alstom-to-supply-metropolis-trainsets-for-the-buenos-aires-metro-
+- Geometría de SBASE: https://data.buenosaires.gob.ar/dataset/subte-estaciones
+- Los datos de SBASE se publican con licencia CC-BY-2.5-AR; se conservaron la fuente y las transformaciones realizadas.
+
+## LÍMITES Y PRÓXIMOS PASOS
+
+- No se auditó toda la serie anual ni se puede asegurar que los cinco días elegidos sean los más representativos.
+- Controlar interrupciones, molinetes faltantes, registros de transbordos y posibles observaciones atípicas con más fuentes.
+- Comprobar el significado de las columnas de despachos y las condiciones operativas de mayo de 2025.
+- Estimar los destinos mediante hipótesis explícitas y probar sensibilidad, en lugar de afirmar que son observados.
+- Contrastar tiempos de espera y ocupación con mediciones independientes. Reproducir ingresos usados como entrada no es validar el modelo completo.
+</info>
+  <turtleShapes>
+    <shape name="default" rotatable="true" editableColorIndex="0">
+      <polygon color="-7500403" filled="true" marked="true">
+        <point x="150" y="5" />
+        <point x="40" y="250" />
+        <point x="150" y="205" />
+        <point x="260" y="250" />
+      </polygon>
+    </shape>
+    <shape name="circle" rotatable="true" editableColorIndex="0">
+      <circle x="0" y="0" diameter="300" color="-7500403" filled="true" marked="true" />
+    </shape>
+    <shape name="tren-str" rotatable="true" editableColorIndex="0">
+      <polygon color="-7500403" filled="true" marked="true">
+        <point x="95" y="285" />
+        <point x="95" y="70" />
+        <point x="115" y="20" />
+        <point x="185" y="20" />
+        <point x="205" y="70" />
+        <point x="205" y="285" />
+      </polygon>
+    </shape>
+  </turtleShapes>
+  <linkShapes>
+    <shape name="default" curviness="0.0">
+      <lines>
+        <line x="-0.2" visible="false">
+          <dash value="0.0" />
+          <dash value="1.0" />
+        </line>
+        <line x="0.0" visible="true">
+          <dash value="1.0" />
+          <dash value="0.0" />
+        </line>
+        <line x="0.2" visible="false">
+          <dash value="0.0" />
+          <dash value="1.0" />
+        </line>
+      </lines>
+      <indicator>
+        <shape name="link direction" rotatable="true" editableColorIndex="0">
+          <line endX="90" startY="150" marked="true" color="-1920102913" endY="180" startX="150" />
+          <line endX="210" startY="150" marked="true" color="-1920102913" endY="180" startX="150" />
+        </shape>
+      </indicator>
+    </shape>
+  </linkShapes>
+  <experiments>
+    <experiment name="Comparar intervalos" repetitions="1" runMetricsEveryStep="false" sequentialRunOrder="true" timeLimit="3600">
+      <setup>setup</setup>
+      <go>go</go>
+      <metrics>
+        <metric>ingresados</metric>
+        <metric>esperando</metric>
+        <metric>a-bordo</metric>
+        <metric>finalizados</metric>
+        <metric>espera-media</metric>
+        <metric>espera-en-cola</metric>
+        <metric>intervalo-real 0</metric>
+        <metric>intervalo-real (cfg-estaciones - 1)</metric>
+        <metric>balance</metric>
+        <metric>ocupacion-media</metric>
+      </metrics>
+      <constants>
+        <enumeratedValueSet variable="n-trenes">
+          <value value="16" />
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="intervalo-seg">
+          <value value="180" />
+          <value value="240" />
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="viaje-seg">
+          <value value="85" />
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="parada-seg">
+          <value value="20" />
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="maniobra-seg">
+          <value value="120" />
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="capacidad-tren">
+          <value value="1500" />
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="factor-demanda">
+          <value value="100" />
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="semilla">
+          <value value="1" />
+          <value value="2" />
+          <value value="3" />
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="estacion-foco">
+          <value value="1" />
+        </enumeratedValueSet>
+      </constants>
+    </experiment>
+  </experiments>
+  <previewCommands>setup
+repeat 450 [go]</previewCommands>
+</model>
